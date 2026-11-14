@@ -22,6 +22,12 @@ slides-preview = "python docs/slides/build_preview.py"
 qr-survey = "python scripts/qr_survey.py"
 pick-move = "python scripts/pick_move.py"
 gemini-verify = "python scripts/gemini_verify.py"
+demo = "python scripts/demo/run_demo.py"
+demo-approach = "python scripts/demo/phase0_approach.py"
+demo-read-qr = "python scripts/demo/phase1_read_qr.py"
+demo-grasp = "python scripts/demo/phase2_grasp.py"
+demo-move = "python scripts/demo/phase3_move.py"
+demo-release = "python scripts/demo/phase4_release.py"
 
 [dependencies]
 python = "3.10.*"

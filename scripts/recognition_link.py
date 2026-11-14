@@ -22,7 +22,7 @@ from pathlib import Path
 
 from commands import make_go_to, make_target, post_command
 from events import make_event, post_event
-from qr_reader import StableDecoder, decode_qr, locate, parse_payload, parse_zone_marker
+from qr_reader import QRScanner, StableDecoder, locate, parse_payload, parse_zone_marker
 
 LOST_AFTER_SEC = 1.0  # 区画マーカーを見失ったと扱うまでの秒数
 
@@ -84,6 +84,7 @@ class Recognizer:
         self.target_interval = 1.0 / target_hz if target_hz and target_hz > 0 else 0.0
         self.run_id = run_id or datetime.now().strftime("%Y%m%d-%H%M")
         self._decoder = StableDecoder(confirm_frames, cooldown_sec)
+        self._scanner = QRScanner()  # 認識スレッド専用(フレームをまたいで追跡状態を持つ)
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = None
@@ -197,7 +198,7 @@ class Recognizer:
     def _process(self, frame, now):
         dets, box_texts, seen = [], [], {}
         box_points = {}
-        for text, pts in decode_qr(frame):
+        for text, pts in self._scanner.scan(frame):
             zone = parse_zone_marker(text)
             if zone is not None:
                 loc = locate(pts, frame.shape, self.marker_size_m, self.hfov_deg)
@@ -312,7 +313,7 @@ def add_recognizer_args(parser) -> None:
                         help="見た目の台帳 JSON(--gemini 用)")
     parser.add_argument("--gemini-model", type=str, default=None,
                         help="Gemini のモデル名(既定: 環境変数 GEMINI_MODEL、無ければ gemini-3.5-flash-lite)")
-    parser.add_argument("--gemini-timeout", type=float, default=8.0, help="Gemini の HTTP タイムアウト(秒)")
+    parser.add_argument("--gemini-timeout", type=float, default=20.0, help="Gemini の HTTP タイムアウト(秒)")
     parser.add_argument("--gemini-endpoint", type=str, default=None, help="Gemini のエンドポイント(テスト用)")
 
 
@@ -328,7 +329,7 @@ def recognizer_from_args(args, source, **extra):
             catalog = {}
         extra["verifier"] = GeminiVerifier(
             catalog, model=getattr(args, "gemini_model", None), endpoint=getattr(args, "gemini_endpoint", None),
-            timeout=getattr(args, "gemini_timeout", 8.0))
+            timeout=getattr(args, "gemini_timeout", 20.0))
     return Recognizer(
         source, zones=zones, server=getattr(args, "server", None),
         command_url=getattr(args, "command_url", None),

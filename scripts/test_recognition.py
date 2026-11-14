@@ -23,8 +23,8 @@ import commands  # noqa: E402
 import events  # noqa: E402
 import recognize  # noqa: E402
 from camera_source import open_source  # noqa: E402
-from make_qr import encode_qr  # noqa: E402
-from qr_reader import StableDecoder, decode_qr, locate, parse_payload, parse_zone_marker  # noqa: E402
+from make_qr import _encoder, encode_qr, module_count  # noqa: E402
+from qr_reader import QRScanner, StableDecoder, decode_qr, locate, parse_payload, parse_zone_marker  # noqa: E402
 from recognition_link import Recognizer  # noqa: E402
 import gemini_verify as gv  # noqa: E402
 import pick_move  # noqa: E402
@@ -59,10 +59,10 @@ def test_parse():
 
 def test_stable():
     t = [0.0]
-    d = StableDecoder(3, 5.0, clock=lambda: t[0])
+    d = StableDecoder(3, 5.0, window_sec=0.25, clock=lambda: t[0])  # 窓を狭くすると従来の「途切れたらやり直し」と同じ挙動
     assert d.update(["x"], now=0.0) == []
     assert d.update(["x"], now=0.1) == []
-    assert d.update([], now=0.2) == []           # 途切れるとリセット
+    assert d.update([], now=0.2) == []           # 窓(0.25秒)から外れるとやり直し
     assert d.update(["x"], now=0.3) == []
     assert d.update(["x"], now=0.4) == []
     assert d.update(["x"], now=0.5) == ["x"]     # 3連続で確定
@@ -667,13 +667,118 @@ def test_gemini_args():
     ap = argparse.ArgumentParser()
     rl.add_recognizer_args(ap)
     a = ap.parse_args([])
-    assert a.gemini is False and a.gemini_timeout == 8.0 and a.catalog.endswith("catalog.json")
+    assert a.gemini is False and a.gemini_timeout == 20.0 and a.catalog.endswith("catalog.json")
     assert rl.recognizer_from_args(a, None).verifier is None
     a = ap.parse_args(["--gemini", "--gemini-endpoint", "http://127.0.0.1:9/x"])
     with contextlib.redirect_stderr(io.StringIO()):
         r = rl.recognizer_from_args(a, None)
     assert r.verifier is not None and r.verifier.on_result == r._on_verify
     r.verifier.close()
+
+
+def _bg720():
+    """実写風の 1280x720 背景(平滑な濃淡+ノイズ。QR なし)。"""
+    rng = np.random.default_rng(5)
+    small = rng.integers(60, 200, (6, 10, 3), dtype=np.uint8)
+    bg = cv2.resize(small, (1280, 720), interpolation=cv2.INTER_CUBIC).astype(np.int16)
+    bg = np.clip(bg + rng.normal(0, 4, bg.shape), 0, 255).astype(np.uint8)
+    return bg
+
+
+def _scene_w(text, width, pos=(500, 250), blur=True):
+    """見かけの幅 width px(QR本体。白余白は別)の QR を 1280x720 の背景に貼り、
+    ぼかし+JPEG70 をかけた画像と、QR本体の左上(x,y)を返す。"""
+    q = _encoder("M").encode(text)[2:-2, 2:-2]
+    n = q.shape[0]
+    q = cv2.copyMakeBorder(q, 4, 4, 4, 4, cv2.BORDER_CONSTANT, value=255)
+    s = int(round(width * (n + 8) / n))
+    big = cv2.cvtColor(cv2.resize(q, (s, s), interpolation=cv2.INTER_AREA if s < n + 8 else cv2.INTER_LINEAR),
+                       cv2.COLOR_GRAY2BGR)
+    img = _bg720()
+    x, y = pos
+    img[y:y + s, x:x + s] = big
+    if blur:
+        img = cv2.GaussianBlur(img, (3, 3), 0)
+        img = cv2.imdecode(cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 70])[1], 1)
+    off = 4.0 * s / (n + 8)
+    return img, (x + off, y + off)
+
+
+def test_scanner_large_first_frame():
+    text = "B001:A"
+    img, _ = _scene_w(text, 260)
+    sc = QRScanner()
+    res = sc.scan(img)
+    assert res and res[0][0] == text, res
+    assert sc.last_stage == "fast", sc.last_stage
+    assert res[0][1].shape == (4, 2)
+
+
+SMALL_W, SMALL_TEXT = 90, "B001:A"   # 実測で読めると分かった大きさ(約90px)
+
+
+def test_scanner_small_tracks_then_lost():
+    img, (x0, y0) = _scene_w(SMALL_TEXT, SMALL_W)
+    sc = QRScanner()
+    first = None
+    for i in range(1, 41):
+        res = sc.scan(img)
+        if res:
+            first = i
+            break
+    assert first is not None, sc.stats()
+    assert res[0][0] == SMALL_TEXT
+    # 座標は元画像で、貼った位置と数px以内(左上隅を含む4隅のどれかが一致)
+    pts = res[0][1]
+    d = np.linalg.norm(pts - np.array([x0, y0]), axis=1).min()
+    assert d < 6.0, (d, pts, (x0, y0))
+    assert pts[:, 0].max() - pts[:, 0].min() < SMALL_W * 1.3
+    stages = []
+    for _ in range(6):
+        r = sc.scan(img)
+        assert r and r[0][0] == SMALL_TEXT
+        stages.append(sc.last_stage)
+    assert stages.count("track") >= 5, stages          # 以後は追跡で読み続ける
+    assert sc._tracks, "追跡状態があるはず"
+    # QR が消えたら空を返し、追跡が解除される
+    assert sc.scan(_bg720()) == []
+    assert sc.last_stage is None and sc._tracks == []
+    st = sc.stats()
+    assert st["track"]["hits"] >= 5 and st["fast"]["tries"] >= 1
+
+
+def test_scanner_no_qr_worst_time():
+    bg = _bg720()
+    worsts = []
+    for _ in range(3):  # PC の瞬間的な負荷で揺れるので、3回測って最小の「最悪値」で判定する
+        sc = QRScanner()
+        for _ in range(6):  # 検出器の初期化と、重い再試行の間引き判定が落ち着くまでを除く
+            sc.scan(bg)
+        worst = 0.0
+        for _ in range(25):
+            t0 = time.perf_counter()
+            assert sc.scan(bg) == []
+            worst = max(worst, (time.perf_counter() - t0) * 1000.0)
+        worsts.append(worst)
+        if worst < 600.0:
+            break
+    assert min(worsts) < 600.0, f"QRなし最悪 {[round(w) for w in worsts]}ms"
+
+
+def test_stable_window():
+    d = StableDecoder(3, 5.0, window_sec=2.0)
+    assert d.update(["x"], now=0.0) == []
+    assert d.update([], now=0.4) == []        # 読めないフレームが挟まっても
+    assert d.update(["x"], now=0.8) == []
+    assert d.update([], now=1.2) == []
+    assert d.update(["x"], now=1.6) == ["x"]  # 窓(2秒)内に3回で確定
+    d = StableDecoder(3, 5.0, window_sec=2.0)  # 窓の外では確定しない
+    assert d.update(["x"], now=0.0) == []
+    assert d.update(["x"], now=1.5) == []
+    assert d.update(["x"], now=3.0) == []      # 0.0 は窓から外れ、直近2回だけ
+    assert d.update(["x"], now=4.4) == []      # 1.5 も外れる
+    assert d.update(["x"], now=5.0) == ["x"]   # 3.0, 4.4, 5.0
+    assert module_count("B001:A") == 21
 
 
 def main() -> int:

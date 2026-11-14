@@ -122,7 +122,7 @@ def _redact(msg: str, api_key) -> str:
 
 
 def call_gemini(req: dict, api_key: str, endpoint: str = DEFAULT_ENDPOINT,
-                timeout: float = 8.0) -> dict:
+                timeout: float = 20.0) -> dict:
     """POST して応答(dict)を返す。失敗は GeminiError(キーはヘッダのみで渡し、メッセージにも出さない)。"""
     headers = {"x-goog-api-key": api_key, "Content-Type": "application/json",
                "Api-Revision": API_REVISION}
@@ -250,7 +250,7 @@ class GeminiVerifier:
     result = {"box_id","zone","status": match|mismatch|skipped|error,"result","elapsed_ms","error",
               "model","expected"}(model / expected は付加情報)。"""
 
-    def __init__(self, catalog, api_key=None, model=None, endpoint=None, timeout: float = 8.0,
+    def __init__(self, catalog, api_key=None, model=None, endpoint=None, timeout: float = 20.0,
                  on_result=None, max_pending: int = 2):
         self.catalog = catalog or {}
         self._api_key = api_key if api_key is not None else os.environ.get("GEMINI_API_KEY")
@@ -370,7 +370,7 @@ def main() -> int:
     p.add_argument("--expected", default=None, help="期待する見た目(台帳より優先)")
     p.add_argument("--model", "--gemini-model", dest="model", default=None,
                    help=f"モデル名(既定: 環境変数 GEMINI_MODEL、無ければ {DEFAULT_MODEL})")
-    p.add_argument("--timeout", type=float, default=8.0, help="HTTP タイムアウト(秒)")
+    p.add_argument("--timeout", type=float, default=20.0, help="HTTP タイムアウト(秒)")
     p.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help="エンドポイント(テスト用)")
     p.add_argument("--dry-run", action="store_true", help="送信本文を表示するだけで API を呼ばない")
     a = p.parse_args()

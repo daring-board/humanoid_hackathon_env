@@ -37,6 +37,12 @@ R1 の行動ログを JSON で保存・送信するための共通フォーマ�
 | `moving` | 区画へ移動開始 | control | `{"from": "start", "to": "A"}` |
 | `arrived` | 区画に到着（腕での指し示し完了含む） | control | `{"duration_ms": 12400, "gesture": "point"}` |
 | `error` | 異常（読取失敗・想定外QR・移動失敗） | どちらも | `{"qr_raw": "..."}` など |
+| `verified` | Gemini による見た目の照合が一致 | recognition | `{"observed": "...", "confidence": 0.9}` |
+| `demo_start` / `demo_end` | デモ通し実行（`run_demo.py`）の開始・終了 | control | `{"phases": [...], "execute": false}` / `{"ok": true, "failed_phase": null}` |
+| `phase_start` / `phase_end` | 1フェーズ（`scripts/demo/phaseN_*.py`）の開始・終了 | recognition / control | `{"phase": "grasp", "step": 2}` / `{"phase": "grasp", "status": "done", "duration_ms": 5200}` |
+| `step` | フェーズ内の1ステップ（人が読む進捗） | recognition / control | `{"phase": "move"}` |
+
+- `scripts/demo/` の各スクリプトは、上記すべてを `data.phase`（`approach` / `read_qr` / `grasp` / `move` / `release`）付きで `logs/events.jsonl` に直接追記する（receiver は通さない）。詳細は [demo_scripts.md](demo_scripts.md)
 
 - ダッシュボードは上記4種のみ解釈する。未知の `event` はタイムラインにだけ表示し、状態は変えない
 - 拡張したい時は新しい `event` 名を足し、この表に追記する
@@ -49,6 +55,11 @@ R1 の行動ログを JSON で保存・送信するための共通フォーマ�
 | `QR_READ_FAILED` | リトライ上限まで読めなかった | 表示しない（エラー表示のみ） |
 | `MOVE_FAILED` | 移動中の異常・タイムアウト | 表示しない |
 | `ROBOT_FAULT` | ロボット側の異常（接続断・API エラー） | 表示しない |
+| `CONTENT_MISMATCH` | 箱の見た目が台帳と不一致（Gemini 照合） | 表示しない |
+| `PREREQUISITE` | 前フェーズが未完了、または必要な情報（区画など）が無い | 表示しない |
+| `PHASE_FAILED` | 通し実行がいずれかのフェーズの失敗で中断した（`demo_end`） | 表示しない |
+| `INTERRUPTED` | Ctrl+C でフェーズが中断された | 表示しない |
+| `UNEXPECTED` | 想定外の例外（フェーズのスクリプトのバグなど） | 表示しない |
 
 ## 例
 実際のファイルは1行1イベントだが、ここでは読みやすいように整形して示す。
