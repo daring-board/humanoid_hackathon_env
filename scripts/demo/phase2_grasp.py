@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """Step 2: 掴み動作の実行(ロボットアームによる Box 把持)。
 
-ロボットに事前登録した腕動作を再生する。既定はカスタム動作 `grasp_box`(ティーチング機能で保存しておく)。
-プリセットで代用するなら --preset(例: hug)。既定は dry-run、実機へ送るのは --execute のときだけ。
+scripts/pick_move.py と同じ ArmController で把持する(--arm-mode preset: 構え15→挟む17 / custom: 登録済み動作)。
+把持した腕は、Step 3(移動)・Step 4(リリース)まで保持したままにする(正常終了時は解放しない)。
+どの箱か(box_id / zone)は Step 1 が書いた状態JSONから読む。既定は dry-run、実機へ送るのは --execute のときだけ。
 
 例:
   python scripts/demo/phase2_grasp.py --force                      # dry-run(単体確認)
-  python scripts/demo/phase2_grasp.py -i eth0 --execute            # 実機
-  python scripts/demo/phase2_grasp.py -i eth0 --execute --preset hug
+  python scripts/demo/phase2_grasp.py -i eth0 --execute            # 実機(プリセット)
+  python scripts/demo/phase2_grasp.py -i eth0 --execute --arm-mode custom --custom-grab grasp_box
 """
 from __future__ import annotations
 
 import argparse
 import sys
 
-from common import (add_arm_args, add_common_args, add_robot_args, make_arm_client, play_arm_action,
+from common import (PhaseError, add_arm_args, add_common_args, add_robot_args, confirm_execute, make_arm,
                     run_phase, setup_console)
 
 
@@ -28,11 +29,19 @@ def build_parser():
 
 def body(ph):
     box = ph.box
-    ph.step(f"箱 {box['box_id']} を掴む" if box else "箱情報なし(--force)で掴み動作を行う")
-    client = make_arm_client(ph.args)
-    result = play_arm_action(ph, client, "掴み")
-    ph.step("掴み動作が完了")
-    return result
+    zone = (box or {}).get("zone")
+    ph.step(f"箱 {box['box_id']}(区画 {zone} 行き)を掴む" if box else "箱情報なし(--force)で掴み動作を行う",
+            arm_mode=ph.args.arm_mode)
+    arm = make_arm(ph.args)
+    confirm_execute(ph.args, "腕")
+    try:
+        arm.grab()
+    except BaseException:
+        arm.emergency_release()
+        raise
+    ph.step("掴み動作が完了(腕は保持したまま)")
+    return {"arm_mode": ph.args.arm_mode, "box_id": (box or {}).get("box_id"), "zone": zone,
+            "dry_run": ph.dry_run}
 
 
 def main(argv=None) -> int:

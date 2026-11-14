@@ -86,6 +86,46 @@ class ZoneApproach:
         return self._out("forward", self.vx_max, vyaw, "前進")
 
 
+class FixedApproach:
+    """カメラを使わず、開始位置から相対的な固定位置(x前方・y左方[m], 最後に yaw[rad] 旋回)へ
+    時間ベース(デッドレコニング)で移動する。純粋なクラスで、ロボットにも触らない。
+    実際の速度とのずれで位置誤差が出るため、現地で --approach-x 等を調整すること。"""
+
+    def __init__(self, x=1.0, y=0.0, yaw=0.0, vx_max=0.2, vyaw_max=0.3, move_timeout=30.0):
+        self.x, self.y, self.yaw = float(x), float(y), float(yaw)
+        speed = ZoneApproach._clamp("vx", vx_max, VX_LIMIT)
+        self.vyaw = ZoneApproach._clamp("vyaw", vyaw_max, VYAW_LIMIT)
+        dist = (self.x ** 2 + self.y ** 2) ** 0.5
+        if dist > 0 and speed <= 0:
+            raise PickMoveError("--vx が 0 のため並進移動できません。")
+        if self.yaw != 0 and self.vyaw <= 0:
+            raise PickMoveError("--vyaw が 0 のため旋回できません。")
+        self._vx = speed * self.x / dist if dist > 0 else 0.0
+        self._vy = speed * self.y / dist if dist > 0 else 0.0
+        self._t_move = dist / speed if dist > 0 else 0.0
+        self._t_turn = abs(self.yaw) / self.vyaw if self.yaw != 0 else 0.0
+        self.total = self._t_move + self._t_turn
+        self.move_timeout = float(move_timeout)
+        self._t0 = None
+
+    def step(self, now):
+        if self._t0 is None:
+            self._t0 = now
+        el = now - self._t0
+        if self.total > self.move_timeout:
+            return ZoneApproach._out("failed", 0.0, 0.0,
+                                     f"必要時間 {self.total:.1f}秒 が --move-timeout {self.move_timeout:g}秒 を超える")
+        if el < self._t_move:
+            d = ZoneApproach._out("forward", self._vx, 0.0, f"並進 {el:.1f}/{self._t_move:.1f}秒")
+            d["vy"] = self._vy
+            return d
+        if el < self.total:
+            sign = 1.0 if self.yaw > 0 else -1.0
+            return ZoneApproach._out("turn", 0.0, sign * self.vyaw,
+                                     f"旋回 {el - self._t_move:.1f}/{self._t_turn:.1f}秒")
+        return ZoneApproach._out("arrived", 0.0, 0.0, "固定位置に到達(時間ベース)")
+
+
 class DryRunLoco:
     """ロボットへは何も送らず、送るはずだったコマンドを print するだけ。"""
 
@@ -181,8 +221,96 @@ def _approach(rec, loco, zone, appr, deadline, clock, sleep):
         sleep(max(0.0, next_t - clock()))
 
 
+def _approach_fixed(loco, appr, deadline, clock, sleep):
+    printer = _StatusPrinter(clock)
+    next_t = clock()
+    while True:
+        now = clock()
+        if deadline is not None and now >= deadline:
+            return "timeout", "--max-seconds に達した"
+        d = appr.step(now)
+        printer.show("固定位置", d, None)
+        if d["state"] in ("arrived", "failed"):
+            return d["state"], d["reason"]
+        _check("Move", loco.Move(d["vx"], d["vy"], d["vyaw"]))
+        next_t += PERIOD
+        sleep(max(0.0, next_t - clock()))
+
+
+def run_approach(args, loco=None, arm=None, *, clock=time.monotonic, sleep=time.sleep):
+    """approach モード: 認識を使わず、把持→固定位置へ移動→解放。"""
+    appr = FixedApproach(args.approach_x, args.approach_y, args.approach_yaw,
+                         args.vx, args.vyaw, args.move_timeout)
+    if args.execute:
+        print(SAFETY_NOTICE, flush=True)
+    if loco is None:
+        if args.execute:
+            loco = make_real_loco(args.domain, args.interface, init_dds=args.source != "videohub")
+        else:
+            print("[dry-run] ロボットにはコマンドを送りません(実機へ送るには --execute)。", flush=True)
+            loco = DryRunLoco()
+    if arm is None:
+        arm = ArmController(
+            mode=getattr(args, "arm_mode", "preset"),
+            execute=args.execute,
+            custom_grab=getattr(args, "custom_grab", "grab_box"),
+            custom_release=getattr(args, "custom_release", "release_arm"),
+            custom_wait=getattr(args, "custom_wait", 3.0),
+            clamp_roll=getattr(args, "clamp_roll", 0.15),
+            open_roll=getattr(args, "open_roll", 0.45),
+            shoulder_pitch=getattr(args, "shoulder_pitch", -0.35),
+            elbow_angle=getattr(args, "elbow_angle", 0.50),
+        )
+    if args.execute:
+        sleep(3.0)
+    deadline = clock() + args.max_seconds if args.max_seconds else None
+    events = []
+    print(f"[approach] 固定位置へ移動: x={args.approach_x:+.2f}m y={args.approach_y:+.2f}m "
+          f"yaw={args.approach_yaw:+.2f}rad(所要 {appr.total:.1f}秒)", flush=True)
+    try:
+        arm.grab()
+        ev = make_event("moving", None, "fixed", detail="固定位置へ移動開始", source="control",
+                        data={"from": "start", "to": "fixed", "arm_mode": arm.mode})
+        post_event(args.server, ev)
+        events.append(ev)
+
+        t_move = clock()
+        state, reason = _approach_fixed(loco, appr, deadline, clock, sleep)
+        _check("StopMove", loco.StopMove())
+
+        if state == "arrived":
+            arm.release()
+            if args.gesture == "wave":
+                _check("WaveHand", loco.WaveHand())
+            ev = make_event("arrived", None, "fixed", detail="固定位置に到着・配置完了", source="control",
+                            data={"duration_ms": int((clock() - t_move) * 1000),
+                                  "gesture": args.gesture, "arm_mode": arm.mode})
+        elif state == "failed":
+            arm.release()
+            ev = make_event("error", None, "fixed", detail=f"移動失敗: {reason}", source="control",
+                            error={"code": "MOVE_FAILED", "message": reason})
+        else:
+            print(f"[中断] {reason}", flush=True)
+            return events
+        post_event(args.server, ev)
+        events.append(ev)
+    except KeyboardInterrupt:
+        print("中断しました(停止・解放コマンドを送ります)。", file=sys.stderr)
+        raise
+    finally:
+        try:
+            loco.StopMove()
+        except Exception as e:
+            print(f"[警告] 最終の StopMove に失敗: {type(e).__name__}: {e}",
+                  file=sys.stderr, flush=True)
+        arm.emergency_release()
+    return events
+
+
 def run(args, source=None, loco=None, arm=None, *, clock=time.monotonic, sleep=time.sleep):
-    base = ZoneApproach(args.vx, args.vyaw, args.turn_offset, args.arrive_size,
+    if getattr(args, "approach", False):
+        return run_approach(args, loco, arm, clock=clock, sleep=sleep)
+    base =ZoneApproach(args.vx, args.vyaw, args.turn_offset, args.arrive_size,
                         args.lost_timeout, args.move_timeout, args.search)
     zone_fixed = args.zone.strip().upper() if args.zone else None
     own_source = source is None
@@ -301,6 +429,15 @@ def build_parser():
     parser.add_argument("--max-seconds", type=float, default=None, help="全体の制限秒数(テスト用)")
     parser.add_argument("--zone", type=str, default=None,
                         help="箱のQRを待たず、この zone へ直接向かう(移動だけの単体確認用)")
+
+    parser.add_argument("--approach", action="store_true",
+                        help="approachモード: 認識を使わず、把持→固定位置へ時間ベースで移動→解放")
+    parser.add_argument("--approach-x", type=float, default=1.0,
+                        help="approachモード: 前方への移動距離 m(負で後退)")
+    parser.add_argument("--approach-y", type=float, default=0.0,
+                        help="approachモード: 左方への移動距離 m(負で右)")
+    parser.add_argument("--approach-yaw", type=float, default=0.0,
+                        help="approachモード: 並進後の旋回角 rad(正で左回り)")
 
     parser.add_argument("--arm-mode", choices=("preset", "custom", "sdk", "none"), default="preset",
                         help="腕制御モード: preset(15->17->99), custom(ティーチング), sdk(rt/arm_sdk), none(腕なし)")

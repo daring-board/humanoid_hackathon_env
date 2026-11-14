@@ -263,74 +263,47 @@ def setup_console() -> None:
 
 
 # ---------------------------------------------------------------- 腕の操作(掴む・離す)
+# scripts/arm_controller.py の ArmController(pick_move.py と同じ)を使う。
+# フェーズは別プロセスなので、プロセスをまたいで保持できない sdk モードは使えない(preset / custom / none のみ)。
 
-class DryRunArm:
-    """ロボットへは何も送らず、送るはずだった操作を表示するだけ。"""
-
-    def ExecuteAction(self, action):
-        print(f"[dry-run] ExecuteAction({action!r})", flush=True)
-        return 0
-
-    def ExecuteCustomAction(self, name):
-        print(f"[dry-run] ExecuteCustomAction({name!r})", flush=True)
-        return 0
-
-    def ReleaseArm(self):
-        print("[dry-run] ReleaseArm()", flush=True)
-        return 0
+ARM_MODES = ("preset", "custom", "none")
 
 
 def add_arm_args(parser, default_custom: str) -> None:
-    parser.add_argument("--custom-action", type=str, default=default_custom,
-                        help="ティーチングで保存した腕動作の名前(ロボット側に事前登録が必要)")
-    parser.add_argument("--preset", type=str, default=None,
-                        help="プリセット動作の名前(例 hug)。指定すると --custom-action より優先")
-    parser.add_argument("--action-wait", type=float, default=5.0,
-                        help="カスタム動作はノンブロッキングなので、完了とみなすまで待つ秒数")
+    """腕制御の引数。default_custom は custom モードで再生する動作名の既定(掴む/離すのどちらか)。"""
+    parser.add_argument("--arm-mode", choices=ARM_MODES, default="preset",
+                        help="腕制御: preset(構え15→挟む17 / 解放99), custom(ティーチング済み動作), none(腕を動かさない)")
+    parser.add_argument("--custom-grab", type=str, default="grasp_box",
+                        help="custom モードの把持動作名(ロボット側に事前登録が必要)")
+    parser.add_argument("--custom-release", type=str, default="release_box",
+                        help="custom モードの解放動作名(再生後に ReleaseArm も送る。release_arm なら ReleaseArm のみ)")
+    parser.add_argument("--custom-wait", type=float, default=3.0,
+                        help="custom モードで動作の完了とみなすまで待つ秒数")
 
 
-def make_arm_client(args):
-    """実機の R1ArmActionClient(--execute のとき)か DryRunArm を返す。SDK は必要になったここで import。"""
-    if not args.execute:
+def make_arm(args):
+    """ArmController を作る(--execute のときだけ DDS を初期化して実機クライアントを開く)。"""
+    if args.execute and args.arm_mode != "none":
+        try:
+            from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+        except ImportError as e:
+            raise PhaseError("ROBOT_FAULT", f"unitree_sdk2py を import できません({e})。"
+                                            "pixi 環境(pixi run python scripts/demo/...)で実行してください。") from e
+        Path("/tmp").mkdir(exist_ok=True)  # CycloneDDS のログ出力先
+        ChannelFactoryInitialize(args.domain, args.interface)
+    elif not args.execute:
         print("[dry-run] ロボットにはコマンドを送りません(実機へ送るには --execute)。", flush=True)
-        return DryRunArm()
     try:
-        from r1_clients import R1ArmActionClient
-        from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+        from arm_controller import ArmController
+        return ArmController(mode=args.arm_mode, execute=args.execute, custom_grab=args.custom_grab,
+                             custom_release=args.custom_release, custom_wait=args.custom_wait)
     except ImportError as e:
-        raise PhaseError("ROBOT_FAULT", f"unitree_sdk2py を import できません({e})。"
-                                        "pixi 環境(pixi run python scripts/demo/...)で実行してください。") from e
-    Path("/tmp").mkdir(exist_ok=True)  # CycloneDDS のログ出力先
-    ChannelFactoryInitialize(args.domain, args.interface)
-    client = R1ArmActionClient()
-    client.SetTimeout(10.0)
-    client.Init()
-    time.sleep(1.0)  # DDS ディスカバリ待ち
-    return client
+        raise PhaseError("ROBOT_FAULT", f"腕制御を初期化できません({e})") from e
 
 
-def play_arm_action(ph: Phase, client, label: str) -> dict:
-    """--preset / --custom-action に従って腕動作を1回再生する。結果の辞書を返す。"""
-    a = ph.args
-    if a.execute:
-        print("実機の腕を動かします。周囲を空け、停止担当(コントローラー)を置いてください。3秒後に開始。", flush=True)
+def confirm_execute(args, what: str) -> None:
+    """--execute のときだけ、安全の注意を出して3秒待つ。"""
+    if args.execute:
+        print(f"実機の{what}を動かします。周囲を空け、停止担当(コントローラー)を置いてください。"
+              "3秒後に開始(やめるなら Ctrl+C)。", flush=True)
         time.sleep(3.0)
-    if a.preset:
-        ph.step(f"{label}: プリセット動作 {a.preset!r} を再生", preset=a.preset)
-        if a.execute:
-            from r1_clients import R1_ARM_ACTIONS
-            if a.preset not in R1_ARM_ACTIONS:
-                raise PhaseError("ROBOT_FAULT", f"未知のプリセット {a.preset!r}(候補: {', '.join(R1_ARM_ACTIONS)})")
-        code = client.ExecuteAction(a.preset)  # ブロッキング(再生が終わるまで戻る)
-        action = {"kind": "preset", "name": a.preset}
-    else:
-        ph.step(f"{label}: カスタム動作 {a.custom_action!r} を再生", custom_action=a.custom_action)
-        code = client.ExecuteCustomAction(a.custom_action)
-        if code in (0, None) and a.execute:
-            ph.step(f"動作の完了を {a.action_wait:g} 秒待つ")
-            time.sleep(a.action_wait)
-        action = {"kind": "custom", "name": a.custom_action}
-    if code not in (0, None):
-        raise PhaseError("ROBOT_FAULT", f"腕動作 {action['name']!r} がエラーコード {code} を返した"
-                                        "(名前がロボットに登録されているか確認)")
-    return {"action": action, "dry_run": ph.dry_run}
