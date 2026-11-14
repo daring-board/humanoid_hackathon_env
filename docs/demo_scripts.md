@@ -62,7 +62,7 @@ pixi run demo-move --zone A --force
 | フェーズ | 主な引数（`--help` で全部見られる） |
 |---|---|
 | 共通 | `--state` `--log` `--force`（前フェーズ未完了でも実行。単体確認用） |
-| `read_qr` | カメラ: `--source {webcam,file,videohub,udp}` `--path` `-i` `-d` ／ 認識: `--zones` `--gemini` `--catalog` ／ `--timeout`（QR 待ちの秒数、既定 60）／ `--show` / `--no-show`（映像表示、既定は表示） |
+| `read_qr` | カメラ: `--source {webcam,file,videohub,udp}` `--path` `-i` `-d` ／ 認識: `--zones` `--gemini` `--catalog` ／ `--timeout`（QR 待ちの秒数、既定 60）／ `--show` / `--no-show`（映像表示、既定は表示）／ 引き渡し: `--then "コマンド"` `--notify-url URL`（下の「分類動作への引き渡し」） |
 | `grasp` / `release` | `--execute` `-i` `-d` ／ `--custom-action NAME`（既定 `grasp_box` / `release_box`）`--preset NAME`（プリセットで代用。例 `hug`）`--action-wait 秒` ／ `release` のみ `--keep-arm` |
 | `move` | `--zone`（状態JSONの区画を上書き。A / B） |
 
@@ -104,6 +104,27 @@ pixi run demo-move --zone A --force
 | `phases.<name>.result` | 各フェーズ | — | 完了時の結果（動作名・所要時間など） |
 
 前提のチェック: `grasp` は `read_qr`、`move` は `grasp`、`release` は `move` が `done`（または `skipped`）でないと `PREREQUISITE` エラーで止まる。フェーズを実行し直すと、そのフェーズ以降の状態は `pending` に戻る。新しい通し実行を始めたいときは `run_demo.py`（先頭から）を実行するか、`logs/state.json` を削除する。
+
+## 分類動作への引き渡し
+
+`read_qr` が読んだ結果（箱ID と区画）を、分類動作（掴む・運ぶ・置く）を実装するスクリプトへ渡す方法は3通りある。
+
+```bash
+# 1. 読めたら続けてコマンドを起動する（{box_id} {zone} {run_id} {verified} {state} を置き換える）
+pixi run demo-read-qr --source videohub -i eth0 --then "python scripts/sort.py --zone {zone} --box {box_id}"
+
+# 2. 状態JSONから取り出す（読むだけ。まだ読めていなければ終了コード 3）
+pixi run demo-next-action                  # 1行の JSON
+pixi run demo-next-action --field zone     # 値だけ（A / B）
+pixi run demo-next-action --fresh --wait 30   # 起動後に読まれた次の箱を、最大30秒待つ
+
+# 3. HTTP で通知する（{"cmd":"sort","box_id":...,"zone":...} を POST。失敗しても read_qr は成功）
+pixi run demo-read-qr --source videohub -i eth0 --notify-url http://localhost:8002/command
+```
+
+- `--then` のコマンドは、状態JSONを保存した後に起動する。終了コードは、そのコマンドのものになる。QR が読めなかったときは起動しない。ルート（`pixi run demo --then "..."`）から渡してもよい。
+- Python からは `scripts/demo/next_action.py` の `read_next_action()` / `wait_next_action()` を import して使える。
+- テスト: `pixi run test-demo-handoff`。
 
 ## イベントログ（各ステップの記録）
 

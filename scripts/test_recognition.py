@@ -609,7 +609,7 @@ def test_verifier_skipped():
                 v.submit("B001", "A", np.zeros((10, 10, 3), np.uint8), None)
             v.close()
         assert [g["status"] for g in got] == ["skipped", "skipped"] and v.results() == got
-        assert err.getvalue().count("GEMINI_API_KEY") == 1  # 警告は起動時の1回だけ
+        assert err.getvalue().count("[警告] GEMINI_API_KEY") == 1  # 警告は起動時の1回だけ(案内文にも名前が出るので警告行で数える)
         time.sleep(0.2)
         assert fake.requests == []
     finally:

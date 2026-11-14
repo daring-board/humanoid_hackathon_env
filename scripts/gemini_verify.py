@@ -3,7 +3,7 @@
 
 QRが確定した瞬間の画像を Gemini に送り、台帳(catalog.json)に書かれた見た目と合っているかを判定する。
 遅い・失敗する・キーが無い場合でも認識と移動は止めない(ワーカースレッドで非同期に処理する)。
-依存は標準ライブラリ(urllib)と numpy / cv2 のみ。API キーは環境変数 GEMINI_API_KEY からだけ読み、
+依存は標準ライブラリ(urllib)と numpy / cv2 のみ。API キーは環境変数 GEMINI_API_KEY(無ければリポジトリ直下の .env)からだけ読み、
 コード・ログ・例外・イベント・保存ファイルには出さない(ヘッダで渡す)。
 
 単体で試す:
@@ -245,6 +245,13 @@ def parse_result(resp: dict) -> dict:
 
 # ---- 非同期の照合器 ----
 
+def _load_env_noted() -> None:
+    """リポジトリ直下の .env を読む(環境変数が優先)。キーを読んだことだけ stderr に出し、値は出さない。"""
+    from env_file import load_env_file
+    if "GEMINI_API_KEY" in load_env_file():
+        print("GEMINI_API_KEY を .env から読み込みました", file=sys.stderr, flush=True)
+
+
 class GeminiVerifier:
     """submit() は即座に返り、ワーカースレッド(1本)で照合する。結果は on_result(result) に渡す。
     result = {"box_id","zone","status": match|mismatch|skipped|error,"result","elapsed_ms","error",
@@ -253,6 +260,8 @@ class GeminiVerifier:
     def __init__(self, catalog, api_key=None, model=None, endpoint=None, timeout: float = 20.0,
                  on_result=None, max_pending: int = 2):
         self.catalog = catalog or {}
+        if api_key is None:  # 明示指定(テスト等)のときは .env を読まない
+            _load_env_noted()
         self._api_key = api_key if api_key is not None else os.environ.get("GEMINI_API_KEY")
         self.model = model or os.environ.get("GEMINI_MODEL") or DEFAULT_MODEL
         self.endpoint = endpoint or DEFAULT_ENDPOINT
@@ -265,7 +274,8 @@ class GeminiVerifier:
         self._closed = False
         self._thread = None
         if not self._api_key:
-            print("[警告] GEMINI_API_KEY が未設定のため、見た目の照合は行いません(認識は通常どおり動きます)。",
+            print("[警告] GEMINI_API_KEY が未設定のため、見た目の照合は行いません(認識は通常どおり動きます)。"
+                  "リポジトリ直下の .env に GEMINI_API_KEY=... と書くか、環境変数に設定してください。",
                   file=sys.stderr, flush=True)
 
     def _emit(self, result):
@@ -363,6 +373,7 @@ def _dry_view(req: dict) -> dict:
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+    _load_env_noted()
     p = argparse.ArgumentParser(description="箱の見た目を Gemini で照合する(単体確認用)")
     p.add_argument("--image", required=True, help="確認する画像ファイル")
     p.add_argument("--box-id", required=True, help="台帳の箱ID(例 B001)")
@@ -400,7 +411,8 @@ def main() -> int:
         return 0
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
-        print("[エラー] 環境変数 GEMINI_API_KEY が未設定です(--dry-run なら不要)。", file=sys.stderr)
+        print("[エラー] 環境変数 GEMINI_API_KEY が未設定です(--dry-run なら不要)。"
+              "リポジトリ直下の .env に GEMINI_API_KEY=... と書くか、環境変数に設定してください。", file=sys.stderr)
         return 2
     t0 = time.monotonic()
     try:
