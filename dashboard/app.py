@@ -6,13 +6,14 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.request
 
 import pandas as pd
 import streamlit as st
 
 import send_dummy
-from common import LOG_PATH, RECEIVER_URL, derive_state, read_events, reset_log, summarize
+from common import FRAME_PATH, LOG_PATH, RECEIVER_URL, derive_state, read_events, reset_log, summarize
 
 st.set_page_config(page_title="ピックR1！ ダッシュボード", layout="wide")
 
@@ -167,6 +168,25 @@ def robot_map(s: dict) -> None:
     )
 
 
+FRAME_STALE_SEC = 5  # この秒数更新が無ければ「映像なし」扱い
+
+
+def camera_view() -> None:
+    """scripts/live_frame.py が書き出す logs/latest.jpg を表示する。"""
+    st.subheader("R1 カメラ映像")
+    try:
+        age = time.time() - FRAME_PATH.stat().st_mtime
+        data = FRAME_PATH.read_bytes()
+    except OSError:  # 無い／書き換え中
+        st.info("映像がありません。認識スクリプトを起動すると表示されます。")
+        return
+    st.image(data, width="stretch")
+    if age > FRAME_STALE_SEC:
+        st.warning(f"映像が {age:.0f} 秒前から更新されていません")
+    else:
+        st.caption(f"更新: {age:.1f} 秒前")
+
+
 def stats(events: list[dict]) -> None:
     st.subheader("集計")
     sm = summarize(events)
@@ -190,6 +210,7 @@ def live() -> None:
     with left:
         timeline(events)
     with right:
+        camera_view()
         robot_map(state)
         stats(events)
 

@@ -20,6 +20,7 @@ from collections import deque
 from datetime import datetime
 from pathlib import Path
 
+import live_frame
 from commands import make_go_to, make_target, post_command
 from events import make_event, post_event
 from qr_reader import QRScanner, StableDecoder, locate, parse_payload, parse_zone_marker
@@ -216,6 +217,7 @@ class Recognizer:
             self._view = (frame, dets)
             for z, loc in seen.items():
                 self._obs[z] = (now, loc)
+        live_frame.publish(frame, dets)  # ダッシュボード用の映像(間引き・失敗しても無害)
         for text in self._decoder.update(box_texts, now=now):
             self._handle_box(text, frame, now, box_points.get(text))
         self._post_target(seen, now)

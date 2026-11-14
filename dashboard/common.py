@@ -12,7 +12,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LOG_PATH = Path(os.environ.get("EVENTS_LOG", ROOT / "logs" / "events.jsonl"))
-RECEIVER_URL = os.environ.get("RECEIVER_URL", "http://127.0.0.1:8000")
+_frame_env = os.environ.get("LIVE_FRAME", "")  # scripts/live_frame.py と同じ出力先
+FRAME_PATH = Path(_frame_env) if _frame_env and _frame_env.lower() != "off" else ROOT / "logs" / "latest.jpg"
+RECEIVER_URL =os.environ.get("RECEIVER_URL", "http://127.0.0.1:8000")
 
 ZONES = ("A", "B")
 IDLE_SEC = 15  # 完了/エラーからこの秒数イベントが無ければ「待機」に戻す（仮値）
