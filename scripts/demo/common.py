@@ -27,12 +27,31 @@ STATE_PATH = Path(os.environ.get("DEMO_STATE", ROOT / "logs" / "state.json"))
 # シナリオ(スプレッドシート「デモ動作シナリオ」)の Step 0〜4 に1対1で対応する
 PHASES = ("approach", "read_qr", "grasp", "move", "release")
 PHASE_INFO = {
-    "approach": {"step": 0, "label": "Boxに近づく", "source": "control", "script": "phase0_approach.py"},
-    "read_qr": {"step": 1, "label": "QRコードの読み取り", "source": "recognition", "script": "phase1_read_qr.py"},
-    "grasp": {"step": 2, "label": "掴み動作の実行", "source": "control", "script": "phase2_grasp.py"},
-    "move": {"step": 3, "label": "目的位置への移動(移動先の決定)", "source": "control", "script": "phase3_move.py"},
-    "release": {"step": 4, "label": "Boxのリリース", "source": "control", "script": "phase4_release.py"},
+    "approach": {"step": 0, "label": "Boxに近づく", "source": "control", "script": "phase0_approach.py",
+                 "summary": "Boxの前(QRが見えて手が届く位置)まで進む。未実装のため手動で配置する"},
+    "read_qr": {"step": 1, "label": "QRコードの読み取り", "source": "recognition", "script": "phase1_read_qr.py",
+                "summary": "カメラでBoxのQRを読み、箱IDと仕分け先の区画(A/B)を決める"},
+    "grasp": {"step": 2, "label": "掴み動作の実行", "source": "control", "script": "phase2_grasp.py",
+              "summary": "腕でBoxを掴む。移動中も保持したままにする"},
+    "move": {"step": 3, "label": "目的位置への移動(移動先の決定)", "source": "control", "script": "phase3_move.py",
+             "summary": "QRで決めた区画の位置まで、Boxを持ったまま歩いて移動する"},
+    "release": {"step": 4, "label": "Boxのリリース", "source": "control", "script": "phase4_release.py",
+                "summary": "目的位置で腕を開いてBoxを離す"},
 }
+STATUS_MARK = {"done": "✅ 完了", "skipped": "⏭ スキップ", "failed": "❌ 失敗"}
+
+
+def phase_start_detail(name: str) -> str:
+    """phase_start の detail。ダッシュボードのタイムラインで目立つよう記号で囲む。"""
+    info = PHASE_INFO[name]
+    return f"▶▶▶ Step {info['step']} 開始: {info['label']} ― {info['summary']}"
+
+
+def phase_end_detail(name: str, status: str, message: str, duration_ms: int | None = None) -> str:
+    """phase_end の detail(開始と対になる形)。"""
+    info = PHASE_INFO[name]
+    took = f"({duration_ms / 1000:.1f}秒)" if duration_ms is not None else ""
+    return f"■■■ Step {info['step']} {STATUS_MARK.get(status, status)}{took}: {info['label']} ― {message}"
 # このフェーズを実行するために done(または skipped)になっているべきフェーズ。--force で無視できる
 REQUIRES = {"approach": (), "read_qr": (), "grasp": ("read_qr",), "move": ("grasp",), "release": ("move",)}
 STATUSES = ("pending", "running", "done", "skipped", "failed")
@@ -211,14 +230,16 @@ class Phase:
         mode = "dry-run" if "execute" in vars(self.args) and self.dry_run else "実行"
         print(f"=== Step {self.info['step']}: {self.info['label']} ({self.name}, run_id={self.run_id}, {mode}) ===",
               flush=True)
-        self.log("phase_start", detail=f"Step {self.info['step']} 開始: {self.info['label']}",
-                 data={"step": self.info["step"], "dry_run": self.dry_run if "execute" in vars(self.args) else None})
+        self.log("phase_start", detail=phase_start_detail(self.name),
+                 data={"step": self.info["step"], "label": self.info["label"], "summary": self.info["summary"],
+                       "dry_run": self.dry_run if "execute" in vars(self.args) else None})
 
     def end(self, status: str, message: str, result: dict | None = None, error: dict | None = None) -> None:
         elapsed = int((time.monotonic() - self.t0) * 1000)
         self._set(status, message, result)
-        self.log("phase_end", detail=f"Step {self.info['step']} {status}: {message}", error=error,
-                 data={"status": status, "duration_ms": elapsed, **({"result": result} if result else {})})
+        self.log("phase_end", detail=phase_end_detail(self.name, status, message, elapsed), error=error,
+                 data={"step": self.info["step"], "label": self.info["label"], "status": status,
+                       "duration_ms": elapsed, **({"result": result} if result else {})})
         print(f"=== {self.name}: {status} - {message} ===", flush=True)
 
 

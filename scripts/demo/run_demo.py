@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 from common import (DEMO_DIR, LOG_PATH, PHASE_INFO, PHASES, STATE_PATH, load_state, log_event, new_state,
-                    reset_state, save_state, setup_console)
+                    phase_end_detail, reset_state, save_state, setup_console)
 
 _PHASE_MODULES = {p: PHASE_INFO[p]["script"][:-3] for p in PHASES}
 
@@ -77,7 +77,8 @@ def main(argv=None) -> int:
     execute = "--execute" in extra
     print(f"##### デモ開始 run_id={run_id} フェーズ={', '.join(names)} "
           f"{'[実機へ送信]' if execute else '[dry-run]'} #####", flush=True)
-    log_event("demo_start", run_id=run_id, source="control", detail="デモ開始",
+    log_event("demo_start", run_id=run_id, source="control",
+              detail=f"▶▶▶▶▶ デモ開始: {' → '.join(PHASE_INFO[n]['label'] for n in names)}",
               data={"phases": list(names), "skip": args.skip, "execute": execute}, path=log_path)
 
     sys.path.insert(0, str(DEMO_DIR))
@@ -88,8 +89,9 @@ def main(argv=None) -> int:
             state["phases"][name].update(status="skipped", message="--skip で指定")
             save_state(state, state_path)
             log_event("phase_end", run_id=run_id, source=PHASE_INFO[name]["source"],
-                      detail=f"Step {PHASE_INFO[name]['step']} skipped: --skip で指定",
-                      data={"phase": name, "status": "skipped"}, path=log_path)
+                      detail=phase_end_detail(name, "skipped", "--skip で指定"),
+                      data={"phase": name, "step": PHASE_INFO[name]["step"], "label": PHASE_INFO[name]["label"],
+                            "status": "skipped"}, path=log_path)
             print(f"--- {name}: スキップ(--skip)", flush=True)
             continue
         parser = importlib.import_module(_PHASE_MODULES[name]).build_parser()
@@ -106,7 +108,7 @@ def main(argv=None) -> int:
     ok = failed is None
     log_event("demo_end", run_id=run_id, source="control", box_id=(state.get("box") or {}).get("box_id"),
               zone=(state.get("box") or {}).get("zone"),
-              detail="デモ完了" if ok else f"デモ中断: {failed[0]} が失敗(終了コード {failed[1]})",
+              detail="■■■■■ デモ完了 ✅" if ok else f"■■■■■ デモ中断 ❌: {failed[0]} が失敗(終了コード {failed[1]})",
               error=None if ok else {"code": "PHASE_FAILED", "message": f"{failed[0]} が失敗"},
               data={"ok": ok, "failed_phase": failed[0] if failed else None}, path=log_path)
     print(f"##### デモ{'完了' if ok else '中断: ' + failed[0] + ' が失敗'} "

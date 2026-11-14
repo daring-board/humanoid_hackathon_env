@@ -23,7 +23,15 @@ STATE_COLORS = {  # (文字色, 背景色)  モックアップのライトテー
     "done": ("#1f8a5b", "#d9f1e6"),
     "err": ("#c63a3a", "#f9dede"),
 }
-EVENT_LABELS = {"scanned": "読取", "moving": "移動", "arrived": "到着", "error": "エラー"}
+EVENT_LABELS = {"scanned": "読取", "moving": "移動", "arrived": "到着", "error": "エラー",
+                "demo_start": "デモ開始", "demo_end": "デモ終了",
+                "phase_start": "▶ フェーズ開始", "phase_end": "■ フェーズ終了", "step": "手順"}
+# タイムラインで目立たせる行（背景色, 文字色）。フェーズの開始・終了とデモの開始・終了
+ROW_STYLES = {
+    "demo_start": ("#1a2230", "#ffffff"), "demo_end": ("#1a2230", "#ffffff"),
+    "phase_start": ("#dfe9fc", "#1d4fa8"), "phase_end": ("#d9f1e6", "#17694a"),
+}
+PHASE_END_FAIL = ("#f9dede", "#a82d2d")
 # マップ上の位置（モックアップの SVG 座標）
 POS = {"start": (70, 135), "A": (330, 62), "B": (330, 208)}
 
@@ -101,17 +109,28 @@ def timeline(events: list[dict]) -> None:
     if not events:
         st.info("まだイベントがありません。サイドバーのデモ操作か send_dummy.py で送信できます。")
         return
+    shown = list(reversed(events[-100:]))  # 新しい順
     rows = [
         {
             "時刻": (e.get("received_at") or e["ts"])[11:19],
             "種別": EVENT_LABELS.get(e["event"], e["event"]),
             "箱ID": e.get("box_id") or "—",
             "分類先": e.get("zone") or "—",
-            "詳細": e.get("detail") or "",
+            "詳細": ("　" + e["detail"]) if e["event"] == "step" and e.get("detail") else (e.get("detail") or ""),
         }
-        for e in reversed(events[-100:])  # 新しい順
+        for e in shown
     ]
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", height=480)
+
+    def row_style(row: pd.Series) -> list[str]:
+        e = shown[int(row.name)]  # type: ignore[arg-type]
+        colors = ROW_STYLES.get(e["event"])
+        if e["event"] == "phase_end" and (e.get("data") or {}).get("status") == "failed":
+            colors = PHASE_END_FAIL
+        if not colors:
+            return [""] * len(row)
+        return [f"background-color:{colors[0]};color:{colors[1]};font-weight:700"] * len(row)
+
+    st.dataframe(pd.DataFrame(rows).style.apply(row_style, axis=1), hide_index=True, width="stretch", height=480)
 
 
 def robot_map(s: dict) -> None:
