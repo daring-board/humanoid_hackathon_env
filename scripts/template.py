@@ -10,8 +10,11 @@ def main() -> None:
     parser.add_argument("-i", "--interface", type=str, default=None, help="Network interface")
     args = parser.parse_args()
 
-    # Windows 環境等での CycloneDDS ログ出力先ディレクトリを確保
-    Path("/tmp").mkdir(exist_ok=True)
+    # Windows 環境等での CycloneDDS ログ出力先ディレクトリを確保（権限エラー対策）
+    try:
+        Path("/tmp").mkdir(exist_ok=True)
+    except OSError:
+        pass
 
     # DDS チャンネル通信を初期化（ドメインID: 0，インターフェース指定）
     ChannelFactoryInitialize(0, args.interface)

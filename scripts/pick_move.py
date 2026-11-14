@@ -1,20 +1,9 @@
-#!/usr/bin/env python3
-"""認識と移動の結合: 箱のQRが確定したら、その zone の区画マーカー(QR `ZONE:A`)を
-カメラで追いながら近づき、十分大きく見えたら停止する。
+﻿#!/usr/bin/env python3
+"""認識と移動・把持の結合: 箱のQRが確定したら腕で把持し、その zone の区画マーカー(QR `ZONE:A`)を
+カメラで追いながら近づき、十分大きく見えたら停止して腕を解放する。
 
 既定は dry-run(ロボットに一切コマンドを送らず、送るはずだった Move 等を print するだけ)。
 実機へ送るのは --execute を付けたときだけ。
-
-例:
-  python scripts/pick_move.py --source webcam                      # dry-run
-  python scripts/pick_move.py --source file --path work/x.png --max-seconds 4
-  python scripts/pick_move.py --source videohub -i eth0 --zone A   # dry-run, 箱を待たず区画Aへ
-  python scripts/pick_move.py --source videohub -i eth0 --execute --once --gesture wave
-  python scripts/pick_move.py --source videohub -d 1 --execute     # モック(DDS ドメイン1)へ
-
-実機で動かす前に: 2名体制(実行者+コントローラーを持った停止担当)、周囲2m以上を空ける、
-初回はロボットを吊った状態で試す、緊急停止は L2+B の長押し。
-使うロボット操作は Move / StopMove / WaveHand だけ(モード切替や起き上がりは呼ばない)。
 """
 from __future__ import annotations
 
@@ -25,14 +14,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from arm_controller import ArmController  # noqa: E402
 from camera_source import CameraError, add_source_args, source_from_args  # noqa: E402
 from events import make_event, post_event  # noqa: E402
 from recognition_link import add_recognizer_args, recognizer_from_args  # noqa: E402
 
-VX_LIMIT = 0.3        # 前進速度の上限(m/s)。コード側で必ず丸める
-VYAW_LIMIT = 0.5      # 旋回速度の上限(rad/s)
-PERIOD = 0.2          # 制御周期(5Hz)。Move は約1秒で失効するので毎周期再送する
-PRINT_INTERVAL = 1.0  # 同じ内容が続くときの表示間隔(秒)
+VX_LIMIT = 0.3
+VYAW_LIMIT = 0.5
+PERIOD = 0.2
+PRINT_INTERVAL = 1.0
 
 
 class PickMoveError(RuntimeError):
@@ -40,15 +30,7 @@ class PickMoveError(RuntimeError):
 
 
 class ZoneApproach:
-    """区画マーカーへ近づく判断(純粋なクラス。ロボットにもカメラにも触らない)。
-
-    step(target, now) -> {"state", "vx", "vy", "vyaw", "reason"}
-      target: Recognizer.get_target(zone) の戻り値(見えなければ None)
-      now: 単調増加の秒(time.monotonic など)。最初の step 呼び出しを開始時刻とする。
-    state: turn(その場旋回) / forward(前進) / search(探索旋回) / wait(静止して待つ)
-           / arrived(到着) / failed(失敗)
-    vyaw は正が反時計回り(左旋回)。マーカーが右(offset>0)なら右旋回=負になる。
-    """
+    """区画マーカーへ近づく判断(純粋なクラス。ロボットにもカメラにも触らない)。"""
 
     def __init__(self, vx_max=0.2, vyaw_max=0.3, turn_offset=0.15, arrive_size=0.25,
                  lost_timeout=3.0, move_timeout=30.0, search=False):
@@ -72,7 +54,6 @@ class ZoneApproach:
         return clamped
 
     def fresh(self):
-        """同じ設定で、開始時刻・最後に見えた時刻だけ初期化した新しいインスタンス(箱ごとに使う)。"""
         return ZoneApproach(self.vx_max, self.vyaw_max, self.turn_offset, self.arrive_size,
                             self.lost_timeout, self.move_timeout, self.search)
 
@@ -117,7 +98,7 @@ class DryRunLoco:
     def Move(self, vx, vy, vyaw):
         key = (round(vx, 3), round(vy, 3), round(vyaw, 3))
         now = self._clock()
-        if key != self._last or now - self._last_t >= self._interval:  # 同じ内容は間引く
+        if key != self._last or now - self._last_t >= self._interval:
             print(f"[dry-run] Move(vx={vx:.3f}, vy={vy:.3f}, vyaw={vyaw:.3f})", flush=True)
             self._last, self._last_t = key, now
         return 0
@@ -132,8 +113,6 @@ class DryRunLoco:
 
 
 def make_real_loco(domain, interface, init_dds):
-    """実機(またはモック)用の R1LocoClient を作る。SDK は必要になったここで初めて import する。
-    init_dds=True のときだけ DDS を初期化する(videohub 取得元は source_from_args が済ませている)。"""
     try:
         from r1_clients import R1LocoClient
         if init_dds:
@@ -143,34 +122,31 @@ def make_real_loco(domain, interface, init_dds):
             f"--execute には unitree_sdk2py が必要ですが import できません({e})。"
             "pixi 環境(pixi run pick-move ...)で実行してください。") from e
     if init_dds:
-        Path("/tmp").mkdir(exist_ok=True)  # CycloneDDS のログ出力先
+        Path("/tmp").mkdir(exist_ok=True)
         ChannelFactoryInitialize(domain, interface)
     loco = R1LocoClient()
     loco.SetTimeout(10.0)
     loco.Init()
-    time.sleep(1.0)  # DDS ディスカバリ待ち。省くと最初の呼び出しが失敗する
+    time.sleep(1.0)
     return loco
 
 
 SAFETY_NOTICE = """\
-================ 実機に移動コマンドを送ります(--execute) ================
+================ 実機にコマンドを送ります(--execute) ================
  - 2名体制: 実行者とは別に、コントローラーを持った停止担当を置く
  - 周囲 2m 以上を空ける。初めて動かすときはロボットを吊った状態で試す
  - 緊急停止: 底面の Emergency Stop、または L2 + B を長押し
- - 送るのは Move / StopMove(と --gesture wave 時の WaveHand)だけ。Ctrl+C でも停止します
+ - Ctrl+C でも StopMove と腕の安全解放が動きます
  3秒後に開始します。やめるなら今すぐ Ctrl+C。
-========================================================================="""
+====================================================================="""
 
 
 def _check(label, code):
-    """RPC の戻り値(0 以外はエラー)を警告に出す。None(戻り値なしの偽物)は無視。"""
     if code not in (0, None):
         print(f"[警告] {label} がエラーコード {code} を返しました。", file=sys.stderr, flush=True)
 
 
 class _StatusPrinter:
-    """毎周期の状態表示。state と速度が同じ間は1秒に1回に間引く。"""
-
     def __init__(self, clock=time.monotonic):
         self._clock = clock
         self._key = None
@@ -189,7 +165,6 @@ class _StatusPrinter:
 
 
 def _approach(rec, loco, zone, appr, deadline, clock, sleep):
-    """1つの区画へ近づく。(state, reason) を返す。state は arrived / failed / timeout。"""
     printer = _StatusPrinter(clock)
     next_t = clock()
     while True:
@@ -206,15 +181,13 @@ def _approach(rec, loco, zone, appr, deadline, clock, sleep):
         sleep(max(0.0, next_t - clock()))
 
 
-def run(args, source=None, loco=None, *, clock=time.monotonic, sleep=time.sleep):
-    """メインループ。control 側で発行したイベント(moving/arrived/error)のリストを返す。
-    source / loco を渡すとテストで偽物を注入できる。"""
+def run(args, source=None, loco=None, arm=None, *, clock=time.monotonic, sleep=time.sleep):
     base = ZoneApproach(args.vx, args.vyaw, args.turn_offset, args.arrive_size,
                         args.lost_timeout, args.move_timeout, args.search)
     zone_fixed = args.zone.strip().upper() if args.zone else None
     own_source = source is None
     if own_source:
-        source = source_from_args(args)  # videohub のときだけ DDS を1回初期化する
+        source = source_from_args(args)
     rec = None
     events = []
     try:
@@ -229,6 +202,18 @@ def run(args, source=None, loco=None, *, clock=time.monotonic, sleep=time.sleep)
             else:
                 print("[dry-run] ロボットにはコマンドを送りません(実機へ送るには --execute)。", flush=True)
                 loco = DryRunLoco()
+        if arm is None:
+            arm = ArmController(
+                mode=getattr(args, "arm_mode", "preset"),
+                execute=args.execute,
+                custom_grab=getattr(args, "custom_grab", "grab_box"),
+                custom_release=getattr(args, "custom_release", "release_arm"),
+                custom_wait=getattr(args, "custom_wait", 3.0),
+                clamp_roll=getattr(args, "clamp_roll", 0.15),
+                open_roll=getattr(args, "open_roll", 0.45),
+                shoulder_pitch=getattr(args, "shoulder_pitch", -0.35),
+                elbow_angle=getattr(args, "elbow_angle", 0.50),
+            )
         if args.execute:
             sleep(3.0)
         deadline = clock() + args.max_seconds if args.max_seconds else None
@@ -242,44 +227,52 @@ def run(args, source=None, loco=None, *, clock=time.monotonic, sleep=time.sleep)
                     if goal is None:
                         continue
                 zone = goal["zone"]
-                print(f"[箱] {goal['box_id']} を区画 {zone} へ運ぶ" if goal["box_id"]
+                print(f"[箱] {goal['box_id']} を把持して区画 {zone} へ運ぶ" if goal["box_id"]
                       else f"[区画 {zone}] 箱を待たず直接向かう", flush=True)
+
+                arm.grab()
+
                 ev = make_event("moving", goal["box_id"], zone, detail=f"区画 {zone} へ移動開始",
                                 run_id=rec.run_id, source="control",
-                                data={"from": "start", "to": zone})
+                                data={"from": "start", "to": zone, "arm_mode": arm.mode})
                 post_event(args.server, ev)
                 events.append(ev)
+
                 t_move = clock()
                 state, reason = _approach(rec, loco, zone, base.fresh(), deadline, clock, sleep)
                 _check("StopMove", loco.StopMove())
+
                 if state == "arrived":
+                    arm.release()
                     if args.gesture == "wave":
                         _check("WaveHand", loco.WaveHand())
-                    ev = make_event("arrived", goal["box_id"], zone, detail=f"区画 {zone} に到着",
+                    ev = make_event("arrived", goal["box_id"], zone, detail=f"区画 {zone} に到着・配置完了",
                                     run_id=rec.run_id, source="control",
                                     data={"duration_ms": int((clock() - t_move) * 1000),
-                                          "gesture": args.gesture})
+                                          "gesture": args.gesture, "arm_mode": arm.mode})
                 elif state == "failed":
+                    arm.release()
                     ev = make_event("error", goal["box_id"], zone, detail=f"移動失敗: {reason}",
                                     run_id=rec.run_id, source="control",
                                     error={"code": "MOVE_FAILED", "message": reason})
-                else:  # timeout: 全体の制限時間での中断。イベントは出さず終了
+                else:
                     print(f"[中断] {reason}", flush=True)
                     break
+
                 post_event(args.server, ev)
                 events.append(ev)
                 if args.once or zone_fixed:
                     break
         except KeyboardInterrupt:
-            print("中断しました(停止コマンドを送ります)。", file=sys.stderr)
+            print("中断しました(停止・解放コマンドを送ります)。", file=sys.stderr)
             raise
         finally:
-            # 正常・例外・Ctrl+C のどれでも必ず停止を送る
             try:
                 loco.StopMove()
             except Exception as e:
                 print(f"[警告] 最終の StopMove に失敗: {type(e).__name__}: {e}",
                       file=sys.stderr, flush=True)
+            arm.emergency_release()
     finally:
         if rec is not None:
             rec.stop(close_source=own_source)
@@ -290,11 +283,11 @@ def run(args, source=None, loco=None, *, clock=time.monotonic, sleep=time.sleep)
 
 def build_parser():
     parser = argparse.ArgumentParser(
-        description="箱QR確定→区画マーカーへ接近→停止。既定は dry-run(--execute で実機へ送信)")
+        description="箱QR確定→腕把持→区画マーカーへ接近→停止・解放。既定は dry-run(--execute で実機へ送信)")
     add_source_args(parser)
     add_recognizer_args(parser)
     parser.add_argument("--execute", action="store_true",
-                        help="実機へ移動コマンドを送る(付けなければ dry-run)")
+                        help="実機へコマンドを送る(付けなければ dry-run)")
     parser.add_argument("--vx", type=float, default=0.2, help=f"前進速度 m/s(上限 {VX_LIMIT} に丸める)")
     parser.add_argument("--vyaw", type=float, default=0.3, help=f"旋回速度 rad/s(上限 {VYAW_LIMIT} に丸める)")
     parser.add_argument("--turn-offset", type=float, default=0.15, help="旋回を始める |offset| の閾値")
@@ -308,6 +301,23 @@ def build_parser():
     parser.add_argument("--max-seconds", type=float, default=None, help="全体の制限秒数(テスト用)")
     parser.add_argument("--zone", type=str, default=None,
                         help="箱のQRを待たず、この zone へ直接向かう(移動だけの単体確認用)")
+
+    parser.add_argument("--arm-mode", choices=("preset", "custom", "sdk", "none"), default="preset",
+                        help="腕制御モード: preset(15->17->99), custom(ティーチング), sdk(rt/arm_sdk), none(腕なし)")
+    parser.add_argument("--custom-grab", type=str, default="grab_box",
+                        help="customモード時の把持アクション名")
+    parser.add_argument("--custom-release", type=str, default="release_arm",
+                        help="customモード時の解放アクション名(または release_arm)")
+    parser.add_argument("--custom-wait", type=float, default=3.0,
+                        help="customモード時のアクション完了待機秒数")
+    parser.add_argument("--clamp-roll", type=float, default=0.15,
+                        help="sdkモード時の把持肩ロール角(rad: 小さいほど狭く挟む)")
+    parser.add_argument("--open-roll", type=float, default=0.45,
+                        help="sdkモード時の開放肩ロール角(rad: 大きいほど広く開く)")
+    parser.add_argument("--shoulder-pitch", type=float, default=-0.35,
+                        help="sdkモード時の肩ピッチ角(rad: 負で腕を前に上げる)")
+    parser.add_argument("--elbow-angle", type=float, default=0.50,
+                        help="sdkモード時の肘角度(rad)")
     return parser
 
 
