@@ -8,9 +8,9 @@
 |---|---|---|---|---|
 | 0 | `approach` | `phase0_approach.py` | Box に近づく（QR が読める位置まで） | **未実装のスタブ**。実行すると `skipped` になる（シナリオ上「無理なら 1 から開始」） |
 | 1 | `read_qr` | `phase1_read_qr.py` | QR を読み、次のアクション（区画 A or B）を決める | 実装済み（既存の認識コードを利用） |
-| 2 | `grasp` | `phase2_grasp.py` | ロボットアームで Box を把持 | 実装済み。**腕動作の事前登録が必要**（下記） |
-| 3 | `move` | `phase3_move.py` | 移動先（区画 A or B）を決めて状態JSONに記録する | 実装済み。**ロボットは動かさず、カメラも使わない**（移動先は固定の場所なので、区画マーカーの確認はしない） |
-| 4 | `release` | `phase4_release.py` | 目的位置で Box を解放・設置 | 実装済み。**腕動作の事前登録が必要**（下記） |
+| 2 | `grasp` | `phase2_grasp.py` | ロボットアームで Box を把持 | 実装済み。`pick_move.py` と同じ `ArmController` で把持（既定 preset。custom は動作の事前登録が必要） |
+| 3 | `move` | `phase3_move.py` | 状態JSONの箱の区画から移動先を特定し、**固定位置へ歩く**（時間ベース。`--track` で区画マーカー追跡） | 実装済み。固定位置は `scripts/demo/zone_positions.json`（**仮置き。現地で実測して書き換える**） |
+| 4 | `release` | `phase4_release.py` | 目的位置で Box を解放・設置（`ArmController.release`） | 実装済み |
 | — | — | `run_demo.py` | 上記を順に呼ぶルート | 実装済み |
 
 ファイル構成:
@@ -63,8 +63,8 @@ pixi run demo-move --zone A --force
 |---|---|
 | 共通 | `--state` `--log` `--force`（前フェーズ未完了でも実行。単体確認用） |
 | `read_qr` | カメラ: `--source {webcam,file,videohub,udp}` `--path` `-i` `-d` ／ 認識: `--zones` `--gemini` `--catalog` ／ `--timeout`（QR 待ちの秒数、既定 60）／ `--show` / `--no-show`（映像表示、既定は表示）／ 引き渡し: `--then "コマンド"` `--notify-url URL`（下の「分類動作への引き渡し」） |
-| `grasp` / `release` | `--execute` `-i` `-d` ／ `--custom-action NAME`（既定 `grasp_box` / `release_box`）`--preset NAME`（プリセットで代用。例 `hug`）`--action-wait 秒` ／ `release` のみ `--keep-arm` |
-| `move` | `--zone`（状態JSONの区画を上書き。A / B） |
+| `grasp` / `release` | `--execute` `-i` `-d` ／ `--arm-mode {preset,custom,none}` `--custom-grab` `--custom-release` `--custom-wait` ／ `release` のみ `--gesture wave`。sdk モードはフェーズ間で保持できないため非対応 |
+| `move` | `--zone`（状態JSONの区画を上書き）`--positions` `--approach-x/y/yaw`（固定位置の上書き）`--vx` `--vyaw` `--move-timeout` ／ `--track` とその用の `--source` `--path` など |
 
 ## 映像の表示（QRの読み取り確認）
 
@@ -137,7 +137,7 @@ pixi run demo-read-qr --source videohub -i eth0 --notify-url http://localhost:80
 | `demo_start` / `demo_end` | ルートの開始・終了（`demo_end` は失敗時 `error.code = PHASE_FAILED`） |
 | `phase_start` / `phase_end` | 各フェーズの開始・終了。`phase_end` の `data` に `status`（done / skipped / failed）と `duration_ms` |
 | `step` | フェーズ内の各ステップ（カメラを開く、QR 確定、腕動作の再生、到着 など） |
-| `scanned` | 既存のイベント。`read_qr` が出す（`move` は `moving` / `arrived` を**出さない**。ロボットが動かないため） |
+| `scanned` / `moving` / `arrived` | 既存のイベント。`read_qr` が `scanned`、`move` が `moving` / `arrived` を出す |
 | `error` | 失敗時。`error.code`（`QR_READ_FAILED` `UNKNOWN_QR` `ROBOT_FAULT` `PREREQUISITE` `INTERRUPTED` `UNEXPECTED`） |
 | `verified` / `CONTENT_MISMATCH` | `read_qr --gemini` のとき、見た目の照合結果 |
 
@@ -151,9 +151,9 @@ pixi run python -c "import json;[print(e['ts'][11:19], e['event'], (e.get('data'
 
 ## 実機で動かす前に
 
-- **腕動作の事前登録**: `grasp` / `release` は、ロボットのティーチング機能で保存したカスタム動作 `grasp_box` / `release_box` を再生する。**この名前の動作を作って保存するところは、まだ誰もやっていない**（`GetActionList()` で一覧を確認できる）。保存できないうちは `--preset`（例 `--preset hug`）で代用できるが、箱を掴めるかは未検証。
-- **`ReleaseArm` の意味は未確認**: `release` は動作の後に `ReleaseArm()`（プリセット ID 99）を送って腕の制御を通常状態に戻す。この呼び出しが箱の保持にどう影響するかは実機で未確認。不安なら `--keep-arm`。
-- **移動は未実装**: `move` は移動先を状態JSONに記録するだけで、ロボットを動かさない。固定の場所へ実際に歩かせる処理は、`destination.zone` を読んで別に実装する（旧版の区画マーカー接近は `scripts/pick_move.py` に残っている）。
+- **腕動作**: 既定の preset（構え15→挟む17／解放99）は事前登録不要。`--arm-mode custom` ならロボットのティーチング機能で `grasp_box` / `release_box` を保存しておく（`GetActionList()` で確認）。箱を掴めるかは未検証。
+- **`ReleaseArm` が箱の保持にどう影響するかは実機で未確認**。
+- **移動は時間ベースのデッドレコニング**: `zone_positions.json` の x/y/yaw は仮置き。実機で歩かせて調整する。Step 3 の間、腕は Step 2 で把持したまま保持する（途中で失敗しても腕は解放しない。Step 4 か手動で解放）。
 - 安全: 2名体制（実行者＋コントローラーを持った停止担当）、周囲 2m 以上を空ける、緊急停止は L2+B 長押し。`--execute` を付けた腕動作（`grasp` / `release`）は、開始前に注意書きと数秒の待ちが入る。
 - `phase0_approach` は未実装。ロボットを箱の前（QR が見える位置）に手で置いてから `--from read_qr`（または `--skip approach`）で始める。
 

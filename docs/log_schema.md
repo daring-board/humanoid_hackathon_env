@@ -42,6 +42,7 @@ R1 の行動ログを JSON で保存・送信するための共通フォーマ�
 | `phase_start` / `phase_end` | 1フェーズ（`scripts/demo/phaseN_*.py`）の開始・終了 | recognition / control | `{"phase": "grasp", "step": 2}` / `{"phase": "grasp", "status": "done", "duration_ms": 5200}` |
 | `step` | フェーズ内の1ステップ（人が読む進捗） | recognition / control | `{"phase": "move"}` |
 
+- `phase_start` の `detail` は `▶▶▶ Step N 開始: <ラベル> ― <処理概要>`、`phase_end` は `■■■ Step N ✅完了/❌失敗/⏭スキップ(秒): …`。`data` に `step` / `label`（start は `summary` = 処理概要）を持つ。ダッシュボードはこの2種を色付きで強調表示する
 - `scripts/demo/` の各スクリプトは、上記すべてを `data.phase`（`approach` / `read_qr` / `grasp` / `move` / `release`）付きで `logs/events.jsonl` に直接追記する（receiver は通さない）。詳細は [demo_scripts.md](demo_scripts.md)
 
 - ダッシュボードは上記4種のみ解釈する。未知の `event` はタイムラインにだけ表示し、状態は変えない

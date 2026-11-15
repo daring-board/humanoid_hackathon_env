@@ -16,14 +16,16 @@ from __future__ import annotations
 import argparse
 import importlib
 import re
+import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 from common import (DEMO_DIR, LOG_PATH, PHASE_INFO, PHASES, STATE_PATH, load_state, log_event, new_state,
-                    reset_state, save_state, setup_console)
+                    phase_end_detail, reset_state, save_state, setup_console)
 
+DASHBOARD_SCRIPT = DEMO_DIR.parent.parent / "dashboard" / "run.py"
 _PHASE_MODULES = {p: PHASE_INFO[p]["script"][:-3] for p in PHASES}
 
 
@@ -43,6 +45,30 @@ def filter_args(parser, tokens):
     return out
 
 
+def _port_in_use(port: int) -> bool:
+    with socket.socket() as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def start_dashboard():
+    """ダッシュボード(receiver:8000 + Streamlit:8501)を起動する。起動済みなら何もせず None を返す。"""
+    if _port_in_use(8501):
+        print("[ダッシュボード] :8501 は起動済みのため、そのまま使います。", flush=True)
+        return None
+    print("[ダッシュボード] 起動します → http://localhost:8501", flush=True)
+    return subprocess.Popen([sys.executable, str(DASHBOARD_SCRIPT)], stdin=subprocess.DEVNULL)
+
+
+def stop_dashboard(proc) -> None:
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         description="デモの全フェーズを順に実行するルートスクリプト(既定は dry-run)",
@@ -51,6 +77,7 @@ def build_parser():
     p.add_argument("--to", dest="stop", choices=PHASES, default=PHASES[-1], help="このフェーズまで実行する")
     p.add_argument("--skip", action="append", choices=PHASES, default=[], metavar="PHASE",
                    help=f"飛ばすフェーズ(複数指定可)。候補: {', '.join(PHASES)}")
+    p.add_argument("--no-dashboard", action="store_true", help="ダッシュボードを同時に起動しない")
     p.add_argument("--state", type=str, default=str(STATE_PATH), help="状態JSONのパス")
     p.add_argument("--log", type=str, default=str(LOG_PATH), help="イベントログ(JSONL)のパス")
     return p
@@ -59,6 +86,14 @@ def build_parser():
 def main(argv=None) -> int:
     setup_console()
     args, extra = build_parser().parse_known_args(argv)
+    dash = None if args.no_dashboard else start_dashboard()
+    try:
+        return run(args, extra)
+    finally:
+        stop_dashboard(dash)
+
+
+def run(args, extra) -> int:
     names = PHASES[PHASES.index(args.start): PHASES.index(args.stop) + 1]
     if not names:
         print("[エラー] --from が --to より後ろです。", file=sys.stderr)
@@ -77,7 +112,8 @@ def main(argv=None) -> int:
     execute = "--execute" in extra
     print(f"##### デモ開始 run_id={run_id} フェーズ={', '.join(names)} "
           f"{'[実機へ送信]' if execute else '[dry-run]'} #####", flush=True)
-    log_event("demo_start", run_id=run_id, source="control", detail="デモ開始",
+    log_event("demo_start", run_id=run_id, source="control",
+              detail=f"▶▶▶▶▶ デモ開始: {' → '.join(PHASE_INFO[n]['label'] for n in names)}",
               data={"phases": list(names), "skip": args.skip, "execute": execute}, path=log_path)
 
     sys.path.insert(0, str(DEMO_DIR))
@@ -88,8 +124,9 @@ def main(argv=None) -> int:
             state["phases"][name].update(status="skipped", message="--skip で指定")
             save_state(state, state_path)
             log_event("phase_end", run_id=run_id, source=PHASE_INFO[name]["source"],
-                      detail=f"Step {PHASE_INFO[name]['step']} skipped: --skip で指定",
-                      data={"phase": name, "status": "skipped"}, path=log_path)
+                      detail=phase_end_detail(name, "skipped", "--skip で指定"),
+                      data={"phase": name, "step": PHASE_INFO[name]["step"], "label": PHASE_INFO[name]["label"],
+                            "status": "skipped"}, path=log_path)
             print(f"--- {name}: スキップ(--skip)", flush=True)
             continue
         parser = importlib.import_module(_PHASE_MODULES[name]).build_parser()
@@ -106,7 +143,7 @@ def main(argv=None) -> int:
     ok = failed is None
     log_event("demo_end", run_id=run_id, source="control", box_id=(state.get("box") or {}).get("box_id"),
               zone=(state.get("box") or {}).get("zone"),
-              detail="デモ完了" if ok else f"デモ中断: {failed[0]} が失敗(終了コード {failed[1]})",
+              detail="■■■■■ デモ完了 ✅" if ok else f"■■■■■ デモ中断 ❌: {failed[0]} が失敗(終了コード {failed[1]})",
               error=None if ok else {"code": "PHASE_FAILED", "message": f"{failed[0]} が失敗"},
               data={"ok": ok, "failed_phase": failed[0] if failed else None}, path=log_path)
     print(f"##### デモ{'完了' if ok else '中断: ' + failed[0] + ' が失敗'} "
