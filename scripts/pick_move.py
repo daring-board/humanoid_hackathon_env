@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from arm_controller import ArmController  # noqa: E402
+from arm_controller import ArmController, ArmError  # noqa: E402
 from camera_source import CameraError, add_source_args, source_from_args  # noqa: E402
 from events import make_event, post_event  # noqa: E402
 from recognition_link import add_recognizer_args, recognizer_from_args  # noqa: E402
@@ -152,18 +152,20 @@ class DryRunLoco:
         return 0
 
 
-def make_real_loco(domain, interface, init_dds):
+def make_real_loco(domain, interface, init_dds=True):
+    """実機の R1LocoClient を作る。DDS は常に ensure_dds で初期化する(多重呼び出しは安全)。
+    init_dds は互換のために残しているが、値に関わらず初期化する。"""
+    from dds_util import DdsError, ensure_dds
     try:
         from r1_clients import R1LocoClient
-        if init_dds:
-            from unitree_sdk2py.core.channel import ChannelFactoryInitialize
     except ImportError as e:
         raise PickMoveError(
             f"--execute には unitree_sdk2py が必要ですが import できません({e})。"
             "pixi 環境(pixi run pick-move ...)で実行してください。") from e
-    if init_dds:
-        Path("/tmp").mkdir(exist_ok=True)
-        ChannelFactoryInitialize(domain, interface)
+    try:
+        ensure_dds(domain, interface)
+    except DdsError as e:
+        raise PickMoveError(str(e)) from e
     loco = R1LocoClient()
     loco.SetTimeout(10.0)
     loco.Init()
@@ -200,6 +202,44 @@ def ensure_running_mode(loco, sleep=time.sleep, settle=2.0):
     return fsm
 
 
+RUN_FSM_ID = 811  # R1 の走行モード(Running Mode)
+
+
+def read_fsm_id(loco):
+    """FSM ID を読むだけ(モードは変えない)。取れなければ None。GetFsmId が無い loco でも動く。"""
+    if not hasattr(loco, "GetFsmId"):
+        return None
+    try:
+        res = loco.GetFsmId()
+    except Exception as e:
+        print(f"[警告] GetFsmId に失敗: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        return None
+    code, fsm = res if isinstance(res, tuple) and len(res) == 2 else (0, res)
+    if code not in (0, None) or fsm is None:
+        print(f"[警告] GetFsmId がエラーコード {code} を返しました(走行モードの確認をスキップ)。",
+              file=sys.stderr, flush=True)
+        return None
+    try:
+        return int(fsm)
+    except (TypeError, ValueError):
+        print(f"[警告] GetFsmId の値 {fsm!r} を解釈できません(走行モードの確認をスキップ)。",
+              file=sys.stderr, flush=True)
+        return None
+
+
+def check_run_mode(loco, say=print):
+    """移動前の確認: 走行モード(811)でなければ PickMoveError。モードを変えるコマンドは送らない。
+    say(メッセージ) で FSM ID を表示・記録する。読めなければ警告だけで続行し、None を返す。"""
+    fsm = read_fsm_id(loco)
+    if fsm is None:
+        return None
+    say(f"現在の FSM ID = {fsm}")
+    if fsm != RUN_FSM_ID:
+        raise PickMoveError(f"走行モード({RUN_FSM_ID})ではありません(現在 {fsm})。"
+                            "コントローラーで走行モードにしてから実行してください(R2 + A)")
+    return fsm
+
+
 SAFETY_NOTICE = """\
 ================ 実機にコマンドを送ります(--execute) ================
  - 2名体制: 実行者とは別に、コントローラーを持った停止担当を置く
@@ -213,6 +253,52 @@ SAFETY_NOTICE = """\
 def _check(label, code):
     if code not in (0, None):
         print(f"[警告] {label} がエラーコード {code} を返しました。", file=sys.stderr, flush=True)
+
+
+MOVE_ERROR_LIMIT = 3  # Move がこの回数だけ連続でエラーを返したら失敗にする
+
+
+class _MoveGuard:
+    """Move の戻り値を見て、エラーが連続したら移動を打ち切る判断をする。"""
+
+    def __init__(self, limit=MOVE_ERROR_LIMIT):
+        self.limit = limit
+        self.streak = 0
+        self.total = 0
+        self.codes = []  # エラーコードの記録
+        self.last = None
+        self._hinted = False
+
+    def feed(self, code) -> bool:
+        """Move の戻り値を渡す。打ち切るべきなら True。"""
+        if code in (0, None):
+            self.streak = 0
+            return False
+        self.streak += 1
+        self.total += 1
+        self.codes.append(code)
+        self.last = code
+        _check("Move", code)
+        if not self._hinted:
+            self._hinted = True
+            print("[ヒント] Move が失敗しました。考えられる原因: 走行モード(FSM 811)になっていない、"
+                  "または腕が姿勢保持中で歩行できない。", file=sys.stderr, flush=True)
+        return self.streak >= self.limit
+
+    def message(self) -> str:
+        return (f"Move がエラーコード {self.last} を返し続けた(ロボットが動いていない可能性)。"
+                "走行モードか、腕が姿勢保持中でないかを確認")
+
+
+def _send_move(loco, guard, d):
+    """Move を送る。連続エラーで打ち切るなら StopMove を送って ("failed", 理由) を返す。"""
+    if guard.feed(loco.Move(d["vx"], d["vy"], d["vyaw"])):
+        try:
+            loco.StopMove()
+        except Exception as e:
+            print(f"[警告] StopMove に失敗: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        return "failed", guard.message()
+    return None
 
 
 class _StatusPrinter:
@@ -235,6 +321,7 @@ class _StatusPrinter:
 
 def _approach(rec, loco, zone, appr, deadline, clock, sleep):
     printer = _StatusPrinter(clock)
+    guard = _MoveGuard()
     next_t = clock()
     while True:
         now = clock()
@@ -245,13 +332,16 @@ def _approach(rec, loco, zone, appr, deadline, clock, sleep):
         printer.show(zone, d, tgt)
         if d["state"] in ("arrived", "failed"):
             return d["state"], d["reason"]
-        _check("Move", loco.Move(d["vx"], d["vy"], d["vyaw"]))
+        aborted = _send_move(loco, guard, d)
+        if aborted:
+            return aborted
         next_t += PERIOD
         sleep(max(0.0, next_t - clock()))
 
 
 def _approach_fixed(loco, appr, deadline, clock, sleep):
     printer = _StatusPrinter(clock)
+    guard = _MoveGuard()
     next_t = clock()
     while True:
         now = clock()
@@ -261,7 +351,9 @@ def _approach_fixed(loco, appr, deadline, clock, sleep):
         printer.show("固定位置", d, None)
         if d["state"] in ("arrived", "failed"):
             return d["state"], d["reason"]
-        _check("Move", loco.Move(d["vx"], d["vy"], d["vyaw"]))
+        aborted = _send_move(loco, guard, d)
+        if aborted:
+            return aborted
         next_t += PERIOD
         sleep(max(0.0, next_t - clock()))
 
@@ -274,10 +366,12 @@ def run_approach(args, loco=None, arm=None, *, clock=time.monotonic, sleep=time.
         print(SAFETY_NOTICE, flush=True)
     if loco is None:
         if args.execute:
-            loco = make_real_loco(args.domain, args.interface, init_dds=args.source != "videohub")
+            loco = make_real_loco(args.domain, args.interface)
         else:
             print("[dry-run] ロボットにはコマンドを送りません(実機へ送るには --execute)。", flush=True)
             loco = DryRunLoco()
+    if args.execute:
+        check_run_mode(loco)
     if arm is None:
         arm = ArmController(
             mode=getattr(args, "arm_mode", "preset"),
@@ -289,6 +383,7 @@ def run_approach(args, loco=None, arm=None, *, clock=time.monotonic, sleep=time.
             open_roll=getattr(args, "open_roll", 0.45),
             shoulder_pitch=getattr(args, "shoulder_pitch", -0.35),
             elbow_angle=getattr(args, "elbow_angle", 0.50),
+            grab_preset=getattr(args, "grab_preset", "hug"),
         )
     if args.execute:
         sleep(3.0)
@@ -355,10 +450,12 @@ def run(args, source=None, loco=None, arm=None, *, clock=time.monotonic, sleep=t
             print(SAFETY_NOTICE, flush=True)
         if loco is None:
             if args.execute:
-                loco = make_real_loco(args.domain, args.interface, init_dds=args.source != "videohub")
+                loco = make_real_loco(args.domain, args.interface)
             else:
                 print("[dry-run] ロボットにはコマンドを送りません(実機へ送るには --execute)。", flush=True)
                 loco = DryRunLoco()
+        if args.execute:
+            check_run_mode(loco)
         if arm is None:
             arm = ArmController(
                 mode=getattr(args, "arm_mode", "preset"),
@@ -370,6 +467,7 @@ def run(args, source=None, loco=None, arm=None, *, clock=time.monotonic, sleep=t
                 open_roll=getattr(args, "open_roll", 0.45),
                 shoulder_pitch=getattr(args, "shoulder_pitch", -0.35),
                 elbow_angle=getattr(args, "elbow_angle", 0.50),
+                grab_preset=getattr(args, "grab_preset", "hug"),
             )
         if args.execute:
             sleep(3.0)
@@ -469,7 +567,10 @@ def build_parser():
                         help="approachモード: 並進後の旋回角 rad(正で左回り)")
 
     parser.add_argument("--arm-mode", choices=("preset", "custom", "sdk", "none"), default="preset",
-                        help="腕制御モード: preset(15->17->99), custom(ティーチング), sdk(rt/arm_sdk), none(腕なし)")
+                        help="腕制御モード: preset(99で保持解除→--grab-preset(既定 hug=19)で把持 / 解放99), custom(ティーチング), sdk(rt/arm_sdk), none(腕なし)")
+    parser.add_argument("--grab-preset", type=str, default="hug",
+                        help="presetモード時の把持プリセット名(R1_ARM_ACTIONS。既定 hug=19。"
+                             "挟めなければ forward_push / extend_right_arm_forward など)")
     parser.add_argument("--custom-grab", type=str, default="grab_box",
                         help="customモード時の把持アクション名")
     parser.add_argument("--custom-release", type=str, default="release_arm",
@@ -493,7 +594,7 @@ def main() -> int:
     args = build_parser().parse_args()
     try:
         run(args)
-    except (CameraError, PickMoveError) as e:
+    except (CameraError, PickMoveError, ArmError) as e:
         print(f"[エラー] {e}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

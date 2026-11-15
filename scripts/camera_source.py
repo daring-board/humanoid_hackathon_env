@@ -10,6 +10,7 @@ unitree_sdk2py は videohub を使うときだけ関数内で import する。
 """
 from __future__ import annotations
 
+import collections
 import os
 import sys
 import tempfile
@@ -103,10 +104,30 @@ class FileSource(_Base):
             self._cap.release()
 
 
-class VideoHubSource(_Base):
-    """DDS 経由の画像取得。ChannelFactoryInitialize は呼び出し側で済ませておくこと。"""
+JPEG_EOI_TAIL_MAX = 64  # EOI(FFD9) が末尾からこのバイト数以内にあるものだけ正常とみなす
+DROP_WINDOW = 50        # 捨てた割合を見る直近の枚数
+DROP_WARN_RATIO = 0.30  # これを超えたら警告
+DROP_WARN_INTERVAL = 3.0
 
-    def __init__(self):
+
+def clean_jpeg(data) -> bytes | None:
+    """videohub の JPEG を decode 前に検査する。
+    SOI(FFD8)で始まり、末尾付近(最大 JPEG_EOI_TAIL_MAX バイト以内)に EOI(FFD9)があれば、
+    EOI までに切り詰めたバイト列を返す(余分な末尾バイトを除く)。満たさなければ None(捨てる)。"""
+    data = bytes(data)
+    if len(data) < 4 or data[:2] != b"\xff\xd8":
+        return None
+    idx = data.rfind(b"\xff\xd9")
+    if idx < 2 or len(data) - (idx + 2) > JPEG_EOI_TAIL_MAX:
+        return None
+    return data[:idx + 2]
+
+
+class VideoHubSource(_Base):
+    """DDS 経由の画像取得。DDS は source_from_args が ensure_dds で初期化済みであること。
+    欠けた・余分なバイトのある JPEG は decode 前に検査し、壊れたものは捨てる(None を返す)。"""
+
+    def __init__(self, clock=time.monotonic):
         try:
             from unitree_sdk2py.go2.video.video_client import VideoClient
         except ImportError as e:  # SDK が無い環境
@@ -116,19 +137,49 @@ class VideoHubSource(_Base):
         self._client = VideoClient()
         self._client.SetTimeout(3.0)
         self._client.Init()
+        self._clock = clock
         self._last_warn = 0.0
+        self._last_drop_warn = -1e9
+        self._dropped = 0
+        self._decoded = 0
+        self._recent = collections.deque(maxlen=DROP_WINDOW)  # True=捨てた
+
+    def stats(self) -> dict:
+        total = self._dropped + self._decoded
+        return {"decoded": self._decoded, "dropped": self._dropped,
+                "drop_ratio": (self._dropped / total) if total else 0.0}
+
+    def _note(self, dropped: bool) -> None:
+        self._recent.append(dropped)
+        if dropped:
+            self._dropped += 1
+        else:
+            self._decoded += 1
+        n = len(self._recent)
+        if n >= 10 and sum(self._recent) / n > DROP_WARN_RATIO:
+            now = self._clock()
+            if now - self._last_drop_warn >= DROP_WARN_INTERVAL:
+                self._last_drop_warn = now
+                print(f"[videohub] 直近 {n} 枚のうち {sum(self._recent)} 枚の JPEG が壊れていて捨てました"
+                      "(回線・ロボット側の映像配信の負荷を確認)", file=sys.stderr, flush=True)
 
     def read(self):
         code, data = self._client.GetImageSample()
         if code != 0:
-            now = time.monotonic()
+            now = self._clock()
             if now - self._last_warn > 3.0:
                 print(f"[videohub] GetImageSample エラーコード: {code}"
                       "(DDS接続・-i のインターフェース名・ロボット側の映像サービスを確認)",
                       file=sys.stderr)
                 self._last_warn = now
             return None
-        return cv2.imdecode(np.frombuffer(bytes(data), np.uint8), cv2.IMREAD_COLOR)
+        jpeg = clean_jpeg(data)
+        if jpeg is None:
+            self._note(True)
+            return None
+        img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+        self._note(img is None)
+        return img
 
 
 class UdpSource(_Base):
@@ -248,12 +299,9 @@ def source_from_args(args):
     if args.source in ("videohub", "udp"):
         check_network()
     if args.source == "videohub":
+        from dds_util import DdsError, ensure_dds
         try:
-            from unitree_sdk2py.core.channel import ChannelFactoryInitialize
-        except ImportError as e:
-            raise CameraError(
-                f"unitree_sdk2py を import できません({e})。pixi 環境で実行してください。"
-            ) from e
-        Path("/tmp").mkdir(exist_ok=True)  # CycloneDDS のログ出力先
-        ChannelFactoryInitialize(args.domain, args.interface)
+            ensure_dds(args.domain, args.interface)
+        except DdsError as e:
+            raise CameraError(str(e)) from e
     return open_source(args.source, index=args.index, path=args.path, port=args.port)

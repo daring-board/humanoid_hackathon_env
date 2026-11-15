@@ -37,6 +37,7 @@ demo-move = "python scripts/demo/phase3_move.py"
 demo-release = "python scripts/demo/phase4_release.py"
 demo-next-action = "python scripts/demo/next_action.py"
 test-demo-handoff = "python tests/test_demo_handoff.py"
+test-robot-errors = "python tests/test_robot_errors.py"
 
 [dependencies]
 python = "3.10.*"

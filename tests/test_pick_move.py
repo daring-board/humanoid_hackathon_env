@@ -145,7 +145,7 @@ class TestArmController(unittest.TestCase):
         arm = ArmController(mode="preset", execute=True)
         arm.grab(); arm.release()
         self.assertEqual(FakeArmClient.log,
-                         [("timeout", 30.0), "init", ("action", 15), ("action", 17), "release"])
+                         [("timeout", 30.0), "init", "release", ("action", "hug"), "release"])
 
     def test_custom_default_release(self):
         arm = ArmController(mode="custom", execute=True)
@@ -169,11 +169,12 @@ class TestArmController(unittest.TestCase):
         arm.grab(); arm.release(); arm.emergency_release()
         self.assertEqual(FakeArmClient.log, [])
 
-    def test_error_code_warns(self):
+    def test_error_code_raises(self):
         arm = ArmController(mode="preset", execute=True)
         with mock.patch.object(FakeArmClient, "ExecuteAction", return_value=7):
-            arm.grab()
-        self.assertIn("エラーコード 7", sys.stderr.getvalue())
+            with self.assertRaises(arm_controller.ArmError) as cm:
+                arm.grab()
+        self.assertEqual(cm.exception.code, 7)
 
 
 if __name__ == "__main__":
