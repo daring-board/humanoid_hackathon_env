@@ -3,6 +3,7 @@
 
   go_to  : 「この箱をこの区画へ運べ」(箱のQRが確定したとき1回)
   target : 「区画マーカーはいまこの位置に見えている/見えていない」(定期的に)
+  sort   : 「QRを読んだ結果(箱と区画)」を分類動作の担当へ渡す(phase1 の --notify-url)
 """
 from __future__ import annotations
 
@@ -24,6 +25,12 @@ def _ts() -> str:
 
 def make_go_to(box_id, zone, run_id) -> dict:
     return {"v": 1, "ts": _ts(), "cmd": "go_to", "box_id": box_id, "zone": zone, "run_id": run_id}
+
+
+def make_sort(box_id, zone, run_id, verified=None, scanned_at=None) -> dict:
+    """「この箱をこの区画へ分類せよ」(QRを読んだ結果を、分類動作の担当へ渡す)。"""
+    return {"v": 1, "ts": _ts(), "cmd": "sort", "box_id": box_id, "zone": zone, "verified": verified,
+            "scanned_at": scanned_at, "run_id": run_id, "source": "recognition"}
 
 
 def make_target(zone, loc, run_id, visible=None) -> dict:

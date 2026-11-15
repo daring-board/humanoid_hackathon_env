@@ -35,6 +35,8 @@ demo-read-qr = "python scripts/demo/phase1_read_qr.py"
 demo-grasp = "python scripts/demo/phase2_grasp.py"
 demo-move = "python scripts/demo/phase3_move.py"
 demo-release = "python scripts/demo/phase4_release.py"
+demo-next-action = "python scripts/demo/next_action.py"
+test-demo-handoff = "python tests/test_demo_handoff.py"
 
 [dependencies]
 python = "3.10.*"
