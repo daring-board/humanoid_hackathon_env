@@ -171,6 +171,35 @@ def make_real_loco(domain, interface, init_dds):
     return loco
 
 
+def ensure_running_mode(loco, sleep=time.sleep, settle=2.0):
+    """速度指令の前に FSM を確認し、Running Mode(811) でなければ切り替える。
+
+    切り替えるのは Locked Stand(4) からだけ。脱力/ダンピング/仰向けなどからは
+    安全のため自動で切り替えず PickMoveError にする(コントローラーで立たせてもらう)。
+    """
+    from r1_clients import FSM_LOCKED_STAND, FSM_RUN
+    code, fsm = loco.GetFsmId()
+    if code != 0:
+        raise PickMoveError(f"現在のモードを取得できません(GetFsmId code={code})。接続を確認してください。")
+    print(f"[mode] 現在の FSM ID: {fsm}", flush=True)
+    if fsm == FSM_RUN:
+        return fsm
+    if fsm != FSM_LOCKED_STAND:
+        raise PickMoveError(
+            f"FSM ID {fsm} から自動で歩行モードにはできません。Locked Stand({FSM_LOCKED_STAND})に"
+            f"立たせてから再実行してください(Running Mode は {FSM_RUN})。")
+    print(f"[mode] Locked Stand → Running Mode({FSM_RUN}) に切り替えます", flush=True)
+    code = loco.Start()
+    if code != 0:
+        raise PickMoveError(f"Running Mode への切り替えに失敗(SetFsmId code={code})")
+    sleep(settle)
+    code, fsm = loco.GetFsmId()
+    if code != 0 or fsm != FSM_RUN:
+        raise PickMoveError(f"切り替え後も Running Mode になっていません(code={code}, FSM ID={fsm})")
+    print("[mode] Running Mode になりました", flush=True)
+    return fsm
+
+
 SAFETY_NOTICE = """\
 ================ 実機にコマンドを送ります(--execute) ================
  - 2名体制: 実行者とは別に、コントローラーを持った停止担当を置く

@@ -1,5 +1,5 @@
 {
-  "B001": {"zone": "A", "expected": "赤いラベルが貼られた段ボール箱"},
-  "B002": {"zone": "B", "expected": "青いテープで封をされた小さめの段ボール箱"},
-  "B003": {"zone": "A", "expected": "白い無地の箱に黒いマークが付いたもの"}
+  "B001": {"zone": "A", "expected": "ELITE ROBOTSと書かれた段ボール箱"},
+  "B002": {"zone": "B", "expected": "ELITE ROBOTSと書かれた段ボール箱"},
+  "B003": {"zone": "B", "expected": "ELITE ROBOTSと書かれた段ボール箱"}
 }

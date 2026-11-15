@@ -32,7 +32,7 @@ def _wave(ph):
         print("[dry-run] WaveHand()", flush=True)
         return
     from pick_move import make_real_loco
-    code = make_real_loco(ph.args.domain, ph.args.interface, init_dds=False).WaveHand()
+    code = make_real_loco(ph.args.domain, ph.args.interface, init_dds=True).WaveHand()
     if code not in (0, None):
         ph.step(f"[警告] WaveHand がエラーコード {code} を返した")
 

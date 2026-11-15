@@ -90,7 +90,9 @@ def make_loco(args):
         print("[dry-run] ロボットにはコマンドを送りません(実機へ送るには --execute)。", flush=True)
         return pick_move.DryRunLoco()
     try:
-        return pick_move.make_real_loco(args.domain, args.interface, init_dds=args.source != "videohub")
+        # フェーズは別プロセスで動くので、このプロセスで必ず DDS を初期化する
+        # (ChannelFactory は初期化済みなら何もしないため、videohub 側との二重初期化は無害)
+        return pick_move.make_real_loco(args.domain, args.interface, init_dds=True)
     except pick_move.PickMoveError as e:
         raise PhaseError("ROBOT_FAULT", str(e)) from e
 
@@ -122,6 +124,10 @@ def body(ph):
     if args.execute:
         print(pick_move.SAFETY_NOTICE, flush=True)
         sleep(3.0)
+        try:
+            pick_move.ensure_running_mode(loco, sleep)
+        except pick_move.PickMoveError as e:
+            raise PhaseError("ROBOT_FAULT", str(e)) from e
     ph.log("moving", detail=f"区画 {zone} へ移動開始({mode})", zone=zone,
            data={"from": "start", "to": zone, "mode": mode, "position": pos})
     t_move = clock()
