@@ -4,7 +4,7 @@
 
 - 既定は **ドライラン**(ロボットにコマンドを送らず、送る内容を表示するだけ)。
 - 実機へ送るのは `--execute` を付けたときだけ(**ロボットが実際に動く**)。
-- `-i` はネットワークインターフェース(例: `eth0`, `en7`)。以下は `eth0` で記載。
+- `-i` はネットワークインターフェース(例: `Ethenet`, `en7`)。以下は `Ethenet` で記載。
 - `pixi run <task>` の後ろの引数はそのままスクリプトへ渡される。
 
 ---
@@ -14,7 +14,7 @@
 ### 通し
 
 ```bash
-pixi run demo --source videohub -i eth0      # phase1 はロボットの映像を使う(ロボットは動かない)
+pixi run demo --source videohub -i Ethenet      # phase1 はロボットの映像を使う(ロボットは動かない)
 pixi run demo --no-dashboard                 # ダッシュボードを起動しない
 pixi run demo --from grasp --to release      # 途中から / 途中まで
 pixi run demo --skip approach                # 特定フェーズを飛ばす
@@ -24,7 +24,7 @@ pixi run demo --skip approach                # 特定フェーズを飛ばす
 
 ```bash
 pixi run demo-approach
-pixi run demo-read-qr --source videohub -i eth0   # 実機の映像でQR読取(ロボットは動かない)
+pixi run demo-read-qr --source videohub -i Ethenet   # 実機の映像でQR読取(ロボットは動かない)
 pixi run demo-grasp
 pixi run demo-move
 pixi run demo-release
@@ -47,26 +47,26 @@ pixi run demo-grasp --force
 ### 通し
 
 ```bash
-pixi run demo --source videohub -i eth0 --execute
-pixi run demo --from grasp --to release -i eth0 --execute    # 途中から(状態JSONを引き継ぐ)
+pixi run demo --source videohub -i Ethenet --execute
+pixi run demo --from grasp --to release -i Ethenet --execute    # 途中から(状態JSONを引き継ぐ)
 ```
 
 ### フェーズ単体
 
 ```bash
-pixi run demo-approach -i eth0 --execute                     # 未実装(スキップ扱い)
-pixi run demo-read-qr  --source videohub -i eth0             # 実機の映像でQR読取(--execute なし。ロボットは動かさない)
-pixi run demo-grasp    -i eth0 --execute                     # 腕で把持(プリセット)
-pixi run demo-move     -i eth0 --execute                     # 固定位置へ移動
-pixi run demo-move     --track --source videohub -i eth0 --execute   # 区画マーカーを追って移動
-pixi run demo-release  -i eth0 --execute                     # 解放
+pixi run demo-approach -i Ethenet --execute                     # 未実装(スキップ扱い)
+pixi run demo-read-qr  --source videohub -i Ethenet             # 実機の映像でQR読取(--execute なし。ロボットは動かさない)
+pixi run demo-grasp    -i Ethenet --execute                     # 腕で把持(プリセット)
+pixi run demo-move     -i Ethenet --execute                     # 固定位置へ移動
+pixi run demo-move     --track --source videohub -i Ethenet --execute   # 区画マーカーを追って移動
+pixi run demo-release  -i Ethenet --execute                     # 解放
 ```
 
 主なオプション例:
 
 ```bash
-pixi run demo-grasp   -i eth0 --execute --arm-mode custom --custom-grab grasp_box
-pixi run demo-release -i eth0 --execute --gesture wave
+pixi run demo-grasp   -i Ethenet --execute --arm-mode custom --custom-grab grasp_box
+pixi run demo-release -i Ethenet --execute --gesture wave
 ```
 
 ---

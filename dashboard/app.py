@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import time
 import urllib.request
 
@@ -15,12 +16,44 @@ import streamlit as st
 import send_dummy
 from common import FRAME_PATH, LOG_PATH, RECEIVER_URL, derive_state, read_events, reset_log, summarize
 
-st.set_page_config(page_title="ピックR1！ ダッシュボード", layout="wide")
+st.set_page_config(page_title="ピックR1！ ダッシュボード", page_icon="🤖", layout="wide")
 
+st.markdown(
+    """
+    <style>
+    .stApp { background: #eef4fd; }
+    .block-container { padding-top: 2rem; max-width: 1400px; }
+    header[data-testid="stHeader"] { background: transparent; }
+    h1 { font-weight: 900 !important; letter-spacing: .01em; color: #0b4db5; }
+    h1 .r1 { color: #ff6a0a; }
+    h3 { font-size: 15px !important; font-weight: 700 !important; color: #0b3f94;
+         text-transform: none; margin-bottom: .25rem !important; }
+    /* 右カラム／左カラムをカード化 */
+    div[data-testid="stColumn"] > div[data-testid="stVerticalBlock"] > div[data-testid="stElementContainer"]:has(h3) {
+        margin-top: 4px; }
+    div[data-testid="stMetric"] { background:#fff; border:1px solid #d3e1f7; border-top:4px solid #ff6a0a; border-radius:12px;
+        padding:14px 18px; box-shadow:0 1px 3px rgba(11,77,181,.10); }
+    div[data-testid="stMetricLabel"] { color:#4a6288; }
+    div[data-testid="stMetricValue"] { font-weight:800; color:#0b4db5; }
+    div[data-testid="stDataFrame"] { border:1px solid #d3e1f7; border-radius:12px; overflow:hidden;
+        box-shadow:0 1px 3px rgba(11,77,181,.10); }
+    div[data-testid="stImage"] img { border-radius:12px; border:1px solid #d3e1f7;
+        box-shadow:0 1px 3px rgba(11,77,181,.10); }
+    section[data-testid="stSidebar"] { background:#fff; border-right:3px solid #ff6a0a; }
+    section[data-testid="stSidebar"] .stButton > button { border-radius:10px; font-weight:700; border:2px solid #0b4db5; color:#0b4db5; }
+    section[data-testid="stSidebar"] .stButton > button:hover { background:#0b4db5; color:#fff; border-color:#0b4db5; }
+    @keyframes pulse { 0%{box-shadow:0 0 0 0 var(--pulse)} 70%{box-shadow:0 0 0 14px transparent}
+                       100%{box-shadow:0 0 0 0 transparent} }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+LOGO_PATH = Path(__file__).resolve().parent.parent / "docs" / "B1C63B70-0118-48BA-8E98-DC4ADD1B25CB.png"
 STATE_COLORS = {  # (文字色, 背景色)  モックアップのライトテーマと同じ
-    "idle": ("#6b778a", "#e7ebf1"),
-    "scan": ("#2f6fe0", "#dfe9fc"),
-    "move": ("#b7791f", "#faecd0"),
+    "idle": ("#5f7090", "#e6ecf6"),
+    "scan": ("#0b57c9", "#dbe8fb"),
+    "move": ("#e8650a", "#ffe6d2"),
     "done": ("#1f8a5b", "#d9f1e6"),
     "err": ("#c63a3a", "#f9dede"),
 }
@@ -29,8 +62,8 @@ EVENT_LABELS = {"scanned": "読取", "moving": "移動", "arrived": "到着", "e
                 "phase_start": "▶ フェーズ開始", "phase_end": "■ フェーズ終了", "step": "手順"}
 # タイムラインで目立たせる行（背景色, 文字色）。フェーズの開始・終了とデモの開始・終了
 ROW_STYLES = {
-    "demo_start": ("#1a2230", "#ffffff"), "demo_end": ("#1a2230", "#ffffff"),
-    "phase_start": ("#dfe9fc", "#1d4fa8"), "phase_end": ("#d9f1e6", "#17694a"),
+    "demo_start": ("#0b2a66", "#ffffff"), "demo_end": ("#0b2a66", "#ffffff"),
+    "phase_start": ("#dbe8fb", "#0b3f94"), "phase_end": ("#d9f1e6", "#17694a"),
 }
 PHASE_END_FAIL = ("#f9dede", "#a82d2d")
 # マップ上の位置（モックアップの SVG 座標）
@@ -47,6 +80,8 @@ def receiver_health() -> dict | None:
 
 
 with st.sidebar:
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), width="stretch")
     st.header("デモ操作")
     health = receiver_health()
     if health:
@@ -82,16 +117,25 @@ def status_header(s: dict) -> None:
     zone = "—" if not s["zone"] else f"区画 {s['zone']}"
     if s["state"] == "err":
         zone = "不明"
+    live = s["state"] in ("scan", "move")
+    anim = "animation:pulse 1.6s infinite;" if live else ""
+    card = ("background:#fff;border:1px solid #d3e1f7;border-radius:14px;padding:16px 24px;"
+            "box-shadow:0 1px 3px rgba(11,77,181,.10);")
+    lbl = "font-size:12px;color:#4a6288;letter-spacing:.08em;margin-bottom:2px;"
     st.html(
         f"""
-        <div style="display:flex;align-items:center;gap:32px;flex-wrap:wrap;
-                    padding:16px 24px;border:1px solid #d8dee7;border-radius:8px;background:#fff;">
-          <div style="background:{bg};color:{fg};font-size:28px;font-weight:700;
-                      padding:10px 22px;border-radius:999px;">● {s['label']}</div>
-          <div><div style="font-size:12px;color:#5d6b7e;">箱ID</div>
-               <div style="font-size:26px;font-weight:600;font-family:monospace;">{s['box_id'] or '—'}</div></div>
-          <div><div style="font-size:12px;color:#5d6b7e;">分類先</div>
-               <div style="font-size:26px;font-weight:600;">{zone}</div></div>
+        <div style="display:flex;align-items:stretch;gap:16px;flex-wrap:wrap;margin-bottom:8px;">
+          <div style="{card}flex:1.4;min-width:260px;border-left:8px solid {fg};display:flex;align-items:center;gap:16px;">
+            <div style="--pulse:{fg}55;{anim}background:{bg};color:{fg};font-size:26px;font-weight:800;
+                        padding:10px 26px;border-radius:999px;">● {s['label']}</div>
+          </div>
+          <div style="{card}flex:1;min-width:180px;">
+            <div style="{lbl}">箱ID</div>
+            <div style="font-size:30px;font-weight:700;font-family:ui-monospace,Menlo,Consolas,monospace;color:#0b2a66;">
+              {s['box_id'] or '—'}</div></div>
+          <div style="{card}flex:1;min-width:180px;">
+            <div style="{lbl}">分類先</div>
+            <div style="font-size:30px;font-weight:700;color:#0b2a66;">{zone}</div></div>
         </div>
         """
     )
@@ -147,22 +191,27 @@ def robot_map(s: dict) -> None:
 
     def zone_rect(name: str, rx: int, ry: int) -> str:
         hot = s["state"] == "done" and zone == name
-        fill, stroke = ("#d9f1e6", "#1f8a5b") if hot else ("#fff", "#d8dee7")
-        return (f'<rect x="{rx}" y="{ry}" width="110" height="72" rx="6" fill="{fill}" stroke="{stroke}" '
-                f'stroke-width="2"/><text x="{rx + 55}" y="{ry + 40}" text-anchor="middle" font-weight="700" '
-                f'fill="#1a2230">区画 {name}</text>')
+        fill, stroke, tc = ("#d9f1e6", "#1f8a5b", "#17694a") if hot else ("#fff", "#9db8e3", "#0b2a66")
+        return (f'<rect x="{rx}" y="{ry}" width="110" height="72" rx="12" fill="{fill}" stroke="{stroke}" '
+                f'stroke-width="2"/><text x="{rx + 55}" y="{ry + 42}" text-anchor="middle" font-weight="700" '
+                f'fill="{tc}">区画 {name}</text>')
 
     st.subheader("現在地（推定）")
     st.html(
         f"""
-        <svg viewBox="0 0 420 270" style="width:100%;background:#f5f7fa;border-radius:6px;">
-          <path d="M70 135 L330 62" stroke="#d8dee7" stroke-width="2" stroke-dasharray="3 5" fill="none"/>
-          <path d="M70 135 L330 208" stroke="#d8dee7" stroke-width="2" stroke-dasharray="3 5" fill="none"/>
+        <svg viewBox="0 0 420 270" style="width:100%;background:#fff;border:1px solid #d3e1f7;
+             border-radius:12px;box-shadow:0 1px 3px rgba(11,77,181,.10);">
+          <defs><pattern id="g" width="20" height="20" patternUnits="userSpaceOnUse">
+            <circle cx="1" cy="1" r="1" fill="#d3e1f7"/></pattern></defs>
+          <rect width="420" height="270" rx="12" fill="url(#g)"/>
+          <path d="M70 135 L330 62" stroke="#f5a623" stroke-width="2" stroke-dasharray="3 5" fill="none"/>
+          <path d="M70 135 L330 208" stroke="#f5a623" stroke-width="2" stroke-dasharray="3 5" fill="none"/>
           {zone_rect('A', 290, 26)}
           {zone_rect('B', 290, 172)}
-          <circle cx="70" cy="135" r="26" fill="#fff" stroke="#5d6b7e" stroke-width="2"/>
-          <text x="70" y="139" text-anchor="middle" font-size="11" fill="#5d6b7e">START</text>
-          <circle cx="{x}" cy="{y}" r="13" fill="#2f5fd0"/>
+          <circle cx="70" cy="135" r="28" fill="#fff" stroke="#0b4db5" stroke-width="3"/>
+          <text x="70" y="139" text-anchor="middle" font-size="11" font-weight="700" fill="#0b4db5">START</text>
+          <circle cx="{x}" cy="{y}" r="20" fill="#ff6a0a" opacity=".22"/>
+          <circle cx="{x}" cy="{y}" r="12" fill="#ff6a0a" stroke="#fff" stroke-width="3"/>
         </svg>
         """
     )
@@ -197,7 +246,7 @@ def stats(events: list[dict]) -> None:
 
 
 # ---------- 本体（1秒ごとに再描画） ----------
-st.title("ピックR1！ 作業ダッシュボード")
+st.markdown('# ピック<span class="r1">R1</span>！ 作業ダッシュボード', unsafe_allow_html=True)
 
 
 @st.fragment(run_every=1)

@@ -40,7 +40,7 @@ def build_parser():
     parser.add_argument("--approach-yaw", type=float, default=None, help="固定位置の yaw を上書き(rad)")
     parser.add_argument("--vx", type=float, default=0.2, help="並進速度 m/s(上限 0.3 に丸める)")
     parser.add_argument("--vyaw", type=float, default=0.3, help="旋回速度 rad/s(上限 0.5 に丸める)")
-    parser.add_argument("--move-timeout", type=float, default=30.0, help="移動の制限秒数")
+    parser.add_argument("--move-timeout", type=float, default=3.0, help="移動の制限秒数")
     parser.add_argument("--max-seconds", type=float, default=None, help="全体の制限秒数(テスト用)")
     parser.add_argument("--track", action="store_true",
                         help="固定位置ではなく、区画マーカー(QR ZONE:A)をカメラで追って近づく")
@@ -134,7 +134,7 @@ def body(ph):
         if args.track:
             state, reason = _track(args, loco, zone, appr, deadline, clock, sleep)
         else:
-            state, reason = pick_move._approach_fixed(loco, appr, deadline, clock, sleep)
+            state, reason = _walk_fixed(loco, appr, deadline, clock, sleep)
     finally:
         try:
             loco.StopMove()  # 腕は保持したまま。ここでは解放しない
@@ -147,6 +147,48 @@ def body(ph):
     ph.log("arrived", detail=f"区画 {zone} に到着", zone=zone, data={"duration_ms": duration_ms, "mode": mode})
     ph.step(f"区画 {zone} に到着({mode}, {duration_ms / 1000:.1f}秒)")
     return {"zone": zone, "mode": mode, "position": pos, "duration_ms": duration_ms, "dry_run": ph.dry_run}
+
+
+WALK_PERIOD = 0.2  # samples/sample_walk.py と同じ送信周期(Move の有効期間は 1 秒)
+
+
+def walk(loco, vx, vy, vyaw, duration, deadline=None, clock=time.monotonic, sleep=time.sleep):
+    """samples/sample_walk.py の walk() と同じ: duration 秒の間、周期的に Move を送り続ける。
+
+    戻りコードは数えて警告にするだけで、エラーでも打ち切らない(サンプルと同じ挙動)。
+    deadline に達したら False を返す。
+    """
+    codes = {}
+    t0 = clock()
+    ok = True
+    while clock() - t0 < duration:
+        if deadline is not None and clock() >= deadline:
+            ok = False
+            break
+        code = loco.Move(vx, vy, vyaw)
+        if code not in (0, None):
+            codes[code] = codes.get(code, 0) + 1
+        sleep(WALK_PERIOD)
+    if codes:
+        print(f"[警告] Move の戻りコード: {codes}(0 以外。ロボットが動いたか目視で確認)",
+              file=sys.stderr, flush=True)
+    return ok
+
+
+def _walk_fixed(loco, appr, deadline, clock, sleep):
+    """FixedApproach の計画(並進 → 旋回)を walk() で実行する。(state, reason) を返す。"""
+    if appr.total > appr.move_timeout:
+        return "failed", f"必要時間 {appr.total:.1f}秒 が --move-timeout {appr.move_timeout:g}秒 を超える"
+    if appr._t_move > 0:
+        print(f"[walk] 並進 vx={appr._vx:.2f} vy={appr._vy:.2f} を {appr._t_move:.1f}秒", flush=True)
+        if not walk(loco, appr._vx, appr._vy, 0.0, appr._t_move, deadline, clock, sleep):
+            return "timeout", "--max-seconds に達した"
+    if appr._t_turn > 0:
+        sign = 1.0 if appr.yaw > 0 else -1.0
+        print(f"[walk] 旋回 vyaw={sign * appr.vyaw:+.2f} を {appr._t_turn:.1f}秒", flush=True)
+        if not walk(loco, 0.0, 0.0, sign * appr.vyaw, appr._t_turn, deadline, clock, sleep):
+            return "timeout", "--max-seconds に達した"
+    return "arrived", "固定位置に到達(時間ベース)"
 
 
 def _track(args, loco, zone, appr, deadline, clock, sleep):
