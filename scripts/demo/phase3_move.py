@@ -40,7 +40,7 @@ def build_parser():
     parser.add_argument("--approach-yaw", type=float, default=None, help="固定位置の yaw を上書き(rad)")
     parser.add_argument("--vx", type=float, default=0.2, help="並進速度 m/s(上限 0.3 に丸める)")
     parser.add_argument("--vyaw", type=float, default=0.3, help="旋回速度 rad/s(上限 0.5 に丸める)")
-    parser.add_argument("--move-timeout", type=float, default=3.0, help="移動の制限秒数")
+    parser.add_argument("--move-timeout", type=float, default=10.0, help="移動の制限秒数")
     parser.add_argument("--max-seconds", type=float, default=None, help="全体の制限秒数(テスト用)")
     parser.add_argument("--track", action="store_true",
                         help="固定位置ではなく、区画マーカー(QR ZONE:A)をカメラで追って近づく")
