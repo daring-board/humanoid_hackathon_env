@@ -180,9 +180,12 @@ def test_next_action():
         t0 = time.monotonic()
         code, out, err = run(na, "--state", sp, "--fresh", "--wait", 1)
         assert code == 3 and out.strip() == "" and time.monotonic() - t0 >= 0.9
-        # 待っている間に新しい箱が書かれたら、それを返す
+        # 待っている間に新しい箱が書かれたら、それを返す。子プロセスの起動時刻に左右されないよう、
+        # 基準時刻は起動前に決めて --newer-than で渡す(--fresh の意味は上の時間切れで確認済み)
+        since = now_iso()
+        time.sleep(0.05)
         threading.Timer(1.0, mark_done, args=("B002", "B")).start()
-        code, out, err = run(na, "--state", sp, "--fresh", "--wait", 10, "--field", "box_id")
+        code, out, err = run(na, "--state", sp, "--newer-than", since, "--wait", 30, "--field", "box_id")
         assert code == 0 and out.strip() == "B002", (code, out, err)
         # 壊れた状態JSON
         sp.write_text("{broken", encoding="utf-8")

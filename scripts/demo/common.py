@@ -293,7 +293,11 @@ ARM_MODES = ("preset", "custom", "none")
 def add_arm_args(parser, default_custom: str) -> None:
     """腕制御の引数。default_custom は custom モードで再生する動作名の既定(掴む/離すのどちらか)。"""
     parser.add_argument("--arm-mode", choices=ARM_MODES, default="preset",
-                        help="腕制御: preset(構え15→挟む17 / 解放99), custom(ティーチング済み動作), none(腕を動かさない)")
+                        help="腕制御: preset(99で保持解除→--grab-preset で把持 / 解放99), "
+                             "custom(ティーチング済み動作), none(腕を動かさない)")
+    parser.add_argument("--grab-preset", type=str, default="hug",
+                        help="preset モードの把持プリセット名(R1_ARM_ACTIONS の名前。既定 hug=19。"
+                             "挟めない場合は forward_push / extend_right_arm_forward など)")
     parser.add_argument("--custom-grab", type=str, default="grasp_box",
                         help="custom モードの把持動作名(ロボット側に事前登録が必要)")
     parser.add_argument("--custom-release", type=str, default="release_box",
@@ -305,19 +309,18 @@ def add_arm_args(parser, default_custom: str) -> None:
 def make_arm(args):
     """ArmController を作る(--execute のときだけ DDS を初期化して実機クライアントを開く)。"""
     if args.execute and args.arm_mode != "none":
+        from dds_util import DdsError, ensure_dds
         try:
-            from unitree_sdk2py.core.channel import ChannelFactoryInitialize
-        except ImportError as e:
-            raise PhaseError("ROBOT_FAULT", f"unitree_sdk2py を import できません({e})。"
-                                            "pixi 環境(pixi run python scripts/demo/...)で実行してください。") from e
-        Path("/tmp").mkdir(exist_ok=True)  # CycloneDDS のログ出力先
-        ChannelFactoryInitialize(args.domain, args.interface)
+            ensure_dds(args.domain, args.interface)
+        except DdsError as e:
+            raise PhaseError("ROBOT_FAULT", str(e)) from e
     elif not args.execute:
         print("[dry-run] ロボットにはコマンドを送りません(実機へ送るには --execute)。", flush=True)
     try:
         from arm_controller import ArmController
         return ArmController(mode=args.arm_mode, execute=args.execute, custom_grab=args.custom_grab,
-                             custom_release=args.custom_release, custom_wait=args.custom_wait)
+                             custom_release=args.custom_release, custom_wait=args.custom_wait,
+                             grab_preset=getattr(args, "grab_preset", "hug"))
     except ImportError as e:
         raise PhaseError("ROBOT_FAULT", f"腕制御を初期化できません({e})") from e
 
