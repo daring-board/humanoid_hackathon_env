@@ -210,9 +210,9 @@ def live() -> None:
     with left:
         timeline(events)
     with right:
+        stats(events)
         camera_view()
         robot_map(state)
-        stats(events)
 
 
 live()
